@@ -1,0 +1,187 @@
+{
+  "name": "vscode-tomcat",
+  "displayName": "Tomcat for VSCode",
+  "description": "IntelliJ IDEA style Apache Tomcat integration for VSCode: register servers, deploy WAR/exploded apps, start/stop/debug, view console logs.",
+  "version": "0.3.1",
+  "publisher": "local-dev",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other", "Debuggers"],
+  "keywords": ["tomcat", "java", "web", "server", "deploy"],
+  "activationEvents": [],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "tomcatExplorer",
+          "title": "Tomcat",
+          "icon": "resources/tomcat.svg"
+        }
+      ]
+    },
+    "views": {
+      "tomcatExplorer": [
+        {
+          "id": "tomcatServers",
+          "name": "Servers",
+          "contextualTitle": "Tomcat Servers"
+        }
+      ],
+      "explorer": [
+        {
+          "id": "tomcatServersExplorer",
+          "name": "Tomcat Servers"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "tomcatServers",
+        "contents": "등록된 Tomcat 서버가 없습니다.\n[Tomcat 서버 추가](command:tomcat.addServer)\n로컬에 설치된 Apache Tomcat(CATALINA_HOME) 경로를 선택하세요."
+      },
+      {
+        "view": "tomcatServersExplorer",
+        "contents": "등록된 Tomcat 서버가 없습니다.\n[Tomcat 서버 추가](command:tomcat.addServer)\n로컬에 설치된 Apache Tomcat(CATALINA_HOME) 경로를 선택하세요."
+      }
+    ],
+    "configuration": {
+      "title": "Tomcat",
+      "properties": {
+        "tomcat.defaultLogLevel": {
+          "type": "string",
+          "enum": ["SEVERE", "WARNING", "INFO", "CONFIG", "FINE", "FINER", "FINEST"],
+          "default": "INFO",
+          "description": "새로 추가되는 서버 및 개별 로그 레벨을 지정하지 않은 서버에 적용되는 기본 Tomcat 로그 레벨(java.util.logging). SEVERE가 가장 적게, FINEST가 가장 많이 출력합니다."
+        },
+        "tomcat.webappSourceDir": {
+          "type": "string",
+          "default": "src/main/webapp",
+          "markdownDescription": "Exploded 배포 시 Maven/Gradle 프로젝트의 라이브 소스 오버레이(JSP·정적 파일 즉시 반영)를 자동 감지할 때 사용하는, 프로젝트 루트 기준 상대 경로입니다. Maven war 플러그인과 Gradle war 플러그인 모두 기본값은 `src/main/webapp` 이지만, Gradle에서 `war { webAppDirName = ... }` 등으로 다른 경로를 쓰는 경우 여기서 변경하세요."
+        },
+        "tomcat.javaAutoBuild": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "라이브 소스 리로드가 켜진 Maven/Gradle exploded 앱에서, `src/main/java` 또는 `src/main/resources` 변경을 감지하면 자동으로 컴파일(`mvn compile` / `gradle classes`)을 실행하고 결과를 배포된 `WEB-INF/classes` 로 동기화할지 여부입니다."
+        },
+        "tomcat.mavenCommand": {
+          "type": "string",
+          "default": "mvn",
+          "description": "Java/리소스 자동 빌드에 사용할 Maven 실행 명령. 프로젝트에 mvnw(mvnw.cmd) 래퍼가 있으면 기본값(mvn)일 때 자동으로 래퍼를 우선 사용합니다."
+        },
+        "tomcat.gradleCommand": {
+          "type": "string",
+          "default": "gradle",
+          "description": "Java/리소스 자동 빌드에 사용할 Gradle 실행 명령. 프로젝트에 gradlew(gradlew.bat) 래퍼가 있으면 기본값(gradle)일 때 자동으로 래퍼를 우선 사용합니다."
+        },
+        "tomcat.servers": {
+          "type": "array",
+          "scope": "application",
+          "markdownDescription": "등록된 Tomcat 서버 목록입니다. **Tomcat 사이드바 뷰**를 통해 추가/수정/삭제하는 것을 권장하며, 여기서는 현재 설정된 내용을 확인하고 필요 시 직접 편집할 수 있습니다.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": { "type": "string", "description": "내부 식별자 (자동 생성, 수정하지 마세요)" },
+              "name": { "type": "string", "description": "서버 표시 이름" },
+              "homePath": { "type": "string", "description": "CATALINA_HOME 경로" },
+              "httpPort": { "type": "number", "description": "HTTP 커넥터 포트" },
+              "debugPort": { "type": "number", "description": "JPDA 디버그 포트" },
+              "javaHome": { "type": "string", "description": "이 서버에서 사용할 JDK 홈 경로 (미지정 시 시스템 기본 JAVA_HOME 사용)" },
+              "logLevel": {
+                "type": "string",
+                "enum": ["SEVERE", "WARNING", "INFO", "CONFIG", "FINE", "FINER", "FINEST"],
+                "description": "이 서버의 로그 레벨 (미지정 시 tomcat.defaultLogLevel 설정값 사용)"
+              },
+              "vmOptions": {
+                "type": "string",
+                "description": "이 서버 시작 시 CATALINA_OPTS 에 추가로 전달할 JVM 옵션 (예: -Xms256m -Xmx1024m -Dfoo=bar)"
+              },
+              "deployedApps": {
+                "type": "array",
+                "description": "이 서버에 배포된 애플리케이션(컨텍스트) 목록",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "contextPath": { "type": "string" },
+                    "sourcePath": { "type": "string" },
+                    "type": { "type": "string", "enum": ["war", "exploded"] },
+                    "sourceOverlayPath": { "type": "string", "description": "exploded(Maven) 배포에서 JSP/정적 파일을 즉시 반영하기 위해 얹은 소스 오버레이 경로 (src/main/webapp 등)" }
+                  }
+                }
+              }
+            }
+          },
+          "default": []
+        }
+      }
+    },
+    "commands": [
+      { "command": "tomcat.addServer", "title": "Tomcat: Add Server", "icon": "$(add)" },
+      { "command": "tomcat.removeServer", "title": "Tomcat: Remove Server", "icon": "$(trash)" },
+      { "command": "tomcat.startServer", "title": "Tomcat: Start Server", "icon": "$(play)" },
+      { "command": "tomcat.debugServer", "title": "Tomcat: Debug Server", "icon": "$(debug-alt)" },
+      { "command": "tomcat.stopServer", "title": "Tomcat: Stop Server", "icon": "$(debug-stop)" },
+      { "command": "tomcat.restartServer", "title": "Tomcat: Restart Server", "icon": "$(debug-restart)" },
+      { "command": "tomcat.deployWar", "title": "Tomcat: Deploy WAR...", "icon": "$(cloud-upload)" },
+      { "command": "tomcat.deployExploded", "title": "Tomcat: Deploy Exploded Folder...", "icon": "$(folder-opened)" },
+      { "command": "tomcat.undeploy", "title": "Tomcat: Undeploy", "icon": "$(trash)" },
+      { "command": "tomcat.openBrowser", "title": "Tomcat: Open in Browser", "icon": "$(globe)" },
+      { "command": "tomcat.showLogs", "title": "Tomcat: Show Console Log", "icon": "$(output)" },
+      { "command": "tomcat.refresh", "title": "Tomcat: Refresh", "icon": "$(refresh)" },
+      { "command": "tomcat.editPorts", "title": "Tomcat: Edit Ports", "icon": "$(settings-gear)" },
+      { "command": "tomcat.editJavaHome", "title": "Tomcat: Set Java Home...", "icon": "$(coffee)" },
+      { "command": "tomcat.setLogLevel", "title": "Tomcat: Set Log Level...", "icon": "$(output)" },
+      { "command": "tomcat.editVmOptions", "title": "Tomcat: Edit VM Options...", "icon": "$(server-process)" },
+      { "command": "tomcat.openSettings", "title": "Tomcat: Open Settings (settings.json)", "icon": "$(settings)" },
+      { "command": "tomcat.addSourceOverlay", "title": "Tomcat: Enable Live Source Reload (Maven/Gradle)...", "icon": "$(sync)" },
+      { "command": "tomcat.reloadContext", "title": "Tomcat: Reload Context Now (No Restart)", "icon": "$(zap)" },
+      { "command": "tomcat.resetManagerCredentials", "title": "Tomcat: Reset Manager Credentials...", "icon": "$(key)" }
+    ],
+    "menus": {
+      "view/title": [
+        { "command": "tomcat.addServer", "when": "view =~ /^tomcatServers/", "group": "navigation@1" },
+        { "command": "tomcat.refresh", "when": "view =~ /^tomcatServers/", "group": "navigation@2" },
+        { "command": "tomcat.openSettings", "when": "view =~ /^tomcatServers/", "group": "navigation@3" }
+      ],
+      "view/item/context": [
+        { "command": "tomcat.startServer", "when": "view =~ /^tomcatServers/ && viewItem == tomcatServer-stopped", "group": "inline@1" },
+        { "command": "tomcat.debugServer", "when": "view =~ /^tomcatServers/ && viewItem == tomcatServer-stopped", "group": "inline@2" },
+        { "command": "tomcat.stopServer", "when": "view =~ /^tomcatServers/ && viewItem =~ /tomcatServer-(running|debugging)/", "group": "inline@1" },
+        { "command": "tomcat.restartServer", "when": "view =~ /^tomcatServers/ && viewItem =~ /tomcatServer-(running|debugging)/", "group": "inline@2" },
+
+        { "command": "tomcat.startServer", "when": "view =~ /^tomcatServers/ && viewItem == tomcatServer-stopped", "group": "1_run@1" },
+        { "command": "tomcat.debugServer", "when": "view =~ /^tomcatServers/ && viewItem == tomcatServer-stopped", "group": "1_run@2" },
+        { "command": "tomcat.stopServer", "when": "view =~ /^tomcatServers/ && viewItem =~ /tomcatServer-(running|debugging)/", "group": "1_run@1" },
+        { "command": "tomcat.restartServer", "when": "view =~ /^tomcatServers/ && viewItem =~ /tomcatServer-(running|debugging)/", "group": "1_run@2" },
+        { "command": "tomcat.deployWar", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatServer-/", "group": "2_deploy@1" },
+        { "command": "tomcat.deployExploded", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatServer-/", "group": "2_deploy@2" },
+        { "command": "tomcat.showLogs", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatServer-/", "group": "3_misc@1" },
+        { "command": "tomcat.editPorts", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatServer-/", "group": "3_misc@2" },
+        { "command": "tomcat.editJavaHome", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatServer-/", "group": "3_misc@3" },
+        { "command": "tomcat.setLogLevel", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatServer-/", "group": "3_misc@4" },
+        { "command": "tomcat.editVmOptions", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatServer-/", "group": "3_misc@5" },
+        { "command": "tomcat.resetManagerCredentials", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatServer-/", "group": "3_misc@6" },
+        { "command": "tomcat.removeServer", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatServer-/", "group": "4_delete@1" },
+
+        { "command": "tomcat.openBrowser", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatApp-/", "group": "inline@1" },
+        { "command": "tomcat.undeploy", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatApp-/", "group": "inline@2" },
+        { "command": "tomcat.openBrowser", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatApp-/", "group": "1_app@1" },
+        { "command": "tomcat.undeploy", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatApp-/", "group": "1_app@2" },
+        { "command": "tomcat.addSourceOverlay", "when": "view =~ /^tomcatServers/ && viewItem == tomcatApp-exploded", "group": "1_app@3" },
+        { "command": "tomcat.reloadContext", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatApp-/", "group": "inline@3" },
+        { "command": "tomcat.reloadContext", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatApp-/", "group": "1_app@4" }
+      ]
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -w -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.4.0"
+  }
+}
