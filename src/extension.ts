@@ -521,6 +521,29 @@ export function activate(context: vscode.ExtensionContext) {
       vscode.window.showInformationMessage('새 계정이 생성되었습니다. 다음 서버 시작 시 적용됩니다.');
     }
   });
+
+  reg('tomcat.forceRebuild', async (item: AppTreeItem) => {
+    if (!item || item.app.type !== 'exploded') return;
+    const channel = manager.getOutputChannel(item.server.id);
+    channel?.show(true);
+    channel?.appendLine(`[build] Force Rebuild Now 실행: ${item.app.contextPath || '/'}`);
+
+    const result = await manager.forceRebuild(item.server.id, item.app.contextPath);
+    if (result.reason) {
+      vscode.window.showWarningMessage(`빌드를 실행할 수 없습니다: ${result.reason}`);
+      return;
+    }
+    if (result.ok) {
+      vscode.window.showInformationMessage(
+        `"${item.app.contextPath}" 컴파일 및 WEB-INF/classes 동기화가 완료되었습니다.`
+      );
+    } else {
+      vscode.window.showErrorMessage(
+        `빌드가 실패했습니다. 출력 채널("Tomcat: ${item.server.name}")에서 자세한 로그를 확인하세요 ` +
+          `(mvn/gradle이 PATH에 없는 경우가 흔한 원인입니다).`
+      );
+    }
+  });
 }
 
 export async function deactivate(): Promise<void> {

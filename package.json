@@ -2,7 +2,7 @@
   "name": "vscode-tomcat",
   "displayName": "Tomcat for VSCode",
   "description": "IntelliJ IDEA style Apache Tomcat integration for VSCode: register servers, deploy WAR/exploded apps, start/stop/debug, view console logs.",
-  "version": "0.3.1",
+  "version": "0.4.1",
   "publisher": "local-dev",
   "engines": {
     "vscode": "^1.85.0"
@@ -75,6 +75,11 @@
           "default": "gradle",
           "description": "Java/리소스 자동 빌드에 사용할 Gradle 실행 명령. 프로젝트에 gradlew(gradlew.bat) 래퍼가 있으면 기본값(gradle)일 때 자동으로 래퍼를 우선 사용합니다."
         },
+        "tomcat.excludeDefaultWebapps": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "켜면 Tomcat 서버 시작 시 `conf/server.xml` 의 `<Host>` 에 `deployIgnore` 속성을 추가해서 번들 기본 웹앱(`ROOT`, `docs`, `examples`, `host-manager`)이 아예 실행되지 않도록 합니다. `manager` 앱은 \"Reload Context Now\" 기능에 필요해서 제외 대상에서 빠집니다. 이미 `deployIgnore` 를 직접 설정해두었다면 덮어쓰지 않습니다."
+        },
         "tomcat.servers": {
           "type": "array",
           "scope": "application",
@@ -136,7 +141,8 @@
       { "command": "tomcat.openSettings", "title": "Tomcat: Open Settings (settings.json)", "icon": "$(settings)" },
       { "command": "tomcat.addSourceOverlay", "title": "Tomcat: Enable Live Source Reload (Maven/Gradle)...", "icon": "$(sync)" },
       { "command": "tomcat.reloadContext", "title": "Tomcat: Reload Context Now (No Restart)", "icon": "$(zap)" },
-      { "command": "tomcat.resetManagerCredentials", "title": "Tomcat: Reset Manager Credentials...", "icon": "$(key)" }
+      { "command": "tomcat.resetManagerCredentials", "title": "Tomcat: Reset Manager Credentials...", "icon": "$(key)" },
+      { "command": "tomcat.forceRebuild", "title": "Tomcat: Force Rebuild Now", "icon": "$(tools)" }
     ],
     "menus": {
       "view/title": [
@@ -170,7 +176,8 @@
         { "command": "tomcat.undeploy", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatApp-/", "group": "1_app@2" },
         { "command": "tomcat.addSourceOverlay", "when": "view =~ /^tomcatServers/ && viewItem == tomcatApp-exploded", "group": "1_app@3" },
         { "command": "tomcat.reloadContext", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatApp-/", "group": "inline@3" },
-        { "command": "tomcat.reloadContext", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatApp-/", "group": "1_app@4" }
+        { "command": "tomcat.reloadContext", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatApp-/", "group": "1_app@4" },
+        { "command": "tomcat.forceRebuild", "when": "view =~ /^tomcatServers/ && viewItem == tomcatApp-exploded", "group": "1_app@5" }
       ]
     }
   },

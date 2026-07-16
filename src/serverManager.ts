@@ -90,6 +90,13 @@ export class ServerManager {
     return vscode.workspace.getConfiguration(CONFIG_SECTION).get<string>('gradleCommand', 'gradle');
   }
 
+  /** Whether Tomcat's own bundled sample/admin webapps (ROOT, docs, examples, host-manager)
+   *  should be excluded from auto-deployment on startup, so only your own app(s) - and the
+   *  Manager app, needed for "Reload Context Now" - actually run. */
+  isExcludeDefaultWebappsEnabled(): boolean {
+    return vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>('excludeDefaultWebapps', false);
+  }
+
   getServers(): TomcatServerConfig[] {
     return this.servers;
   }
@@ -214,12 +221,55 @@ export class ServerManager {
   }
 
   /**
+   * Manually triggers an immediate Java/resource compile + sync for a deployed exploded app,
+   * for diagnosing/forcing the auto-build-on-change feature on demand. Returns a reason
+   * string (no watcher, no Maven/Gradle project detected, auto-build disabled, etc.) when it
+   * can't run at all, distinct from a build that ran but failed (whose output goes to the
+   * server's output channel as usual).
+   */
+  async forceRebuild(serverId: string, contextPath: string): Promise<{ ok: boolean; reason?: string }> {
+    const server = this.getServer(serverId);
+    if (!server) return { ok: false, reason: '서버를 찾을 수 없습니다.' };
+    const app = server.deployedApps.find(a => a.contextPath === contextPath);
+    if (!app || app.type !== 'exploded') return { ok: false, reason: 'exploded 배포가 아닙니다.' };
+    if (!app.sourceOverlayPath) return { ok: false, reason: '라이브 소스 리로드가 활성화되어 있지 않습니다.' };
+    if (!this.isJavaAutoBuildEnabled()) return { ok: false, reason: '"tomcat.javaAutoBuild" 설정이 꺼져 있습니다.' };
+
+    const projectRoot = findProjectRoot(app.sourceOverlayPath) ?? findProjectRoot(app.sourcePath);
+    if (!projectRoot) return { ok: false, reason: 'Maven/Gradle 프로젝트 루트(pom.xml/build.gradle)를 찾지 못했습니다.' };
+
+    const buildInfo = detectBuildInfo(projectRoot, this.getMavenCommand(), this.getGradleCommand());
+    if (!buildInfo) return { ok: false, reason: 'Maven/Gradle 빌드 정보를 감지하지 못했습니다.' };
+
+    let watcher = this.buildWatchers.get(this.syncKey(serverId, contextPath));
+    if (!watcher) {
+      const outputChannel = this.running.get(serverId)?.outputChannel;
+      const classesTargetDir = path.join(app.sourcePath, 'WEB-INF', 'classes');
+      watcher = new JavaBuildSyncWatcher(buildInfo, classesTargetDir, msg => outputChannel?.appendLine(msg), server.javaHome);
+      watcher.start();
+      this.buildWatchers.set(this.syncKey(serverId, contextPath), watcher);
+    }
+
+    const success = await watcher.buildOnce();
+    return { ok: success };
+  }
+
+  /**
    * If Java auto-build is enabled and `overlayPath`/`docBase` sit inside a detectable
    * Maven/Gradle project, starts (or restarts) a watcher that recompiles Java changes and
    * syncs the result into `docBase/WEB-INF/classes`. Silently does nothing if auto-build is
    * disabled or no project could be detected (e.g. a hand-picked, non-standard overlay path).
+   * When `runInitialBuild` is true, waits for one fresh compile to finish before returning
+   * (used right before Tomcat starts, so it boots against up-to-date output).
    */
-  private maybeStartJavaBuildSync(serverId: string, contextPath: string, docBase: string, overlayPath: string) {
+  private async maybeStartJavaBuildSync(
+    serverId: string,
+    contextPath: string,
+    docBase: string,
+    overlayPath: string,
+    runInitialBuild = false,
+    outputChannelOverride?: vscode.OutputChannel
+  ): Promise<void> {
     this.stopJavaBuildSync(serverId, contextPath);
     if (!this.isJavaAutoBuildEnabled()) return;
 
@@ -229,11 +279,20 @@ export class ServerManager {
     const buildInfo = detectBuildInfo(projectRoot, this.getMavenCommand(), this.getGradleCommand());
     if (!buildInfo) return;
 
-    const outputChannel = this.running.get(serverId)?.outputChannel;
+    const outputChannel = outputChannelOverride ?? this.running.get(serverId)?.outputChannel;
     const classesTargetDir = path.join(docBase, 'WEB-INF', 'classes');
-    const watcher = new JavaBuildSyncWatcher(buildInfo, classesTargetDir, msg => outputChannel?.appendLine(msg));
+    const watcher = new JavaBuildSyncWatcher(
+      buildInfo,
+      classesTargetDir,
+      msg => outputChannel?.appendLine(msg),
+      this.getServer(serverId)?.javaHome
+    );
     watcher.start();
     this.buildWatchers.set(this.syncKey(serverId, contextPath), watcher);
+
+    if (runInitialBuild) {
+      await watcher.buildOnce();
+    }
   }
 
   // ---------- detection helpers ----------
@@ -292,6 +351,40 @@ export class ServerManager {
     }
   }
 
+  /**
+   * Adds a `deployIgnore` attribute to the <Host name="localhost"> element in conf/server.xml
+   * so Tomcat's own bundled ROOT/docs/examples/host-manager webapps are skipped entirely by
+   * auto-deployment (both at startup and by the periodic background scan) - only your own
+   * app(s) actually run. The Manager app is deliberately left out of the ignore list since
+   * "Reload Context Now" depends on it. Never overwrites an existing deployIgnore the user
+   * may have already customized by hand.
+   */
+  private applyDeployIgnore(homePath: string, outputChannel?: vscode.OutputChannel) {
+    const serverXmlPath = path.join(homePath, 'conf', 'server.xml');
+    if (!fs.existsSync(serverXmlPath)) return;
+
+    try {
+      let content = fs.readFileSync(serverXmlPath, 'utf8');
+      const hostTagMatch = content.match(/<Host\b[^>]*\bname="localhost"[^>]*>/);
+      if (!hostTagMatch) return;
+
+      const hostTag = hostTagMatch[0];
+      if (/\bdeployIgnore\s*=/.test(hostTag)) {
+        return; // already customized by the user (or a previous run) - leave it alone
+      }
+
+      const ignorePattern = '^(ROOT|docs|examples|host-manager)$';
+      const newHostTag = hostTag.replace(/>$/, ` deployIgnore="${ignorePattern}">`);
+      content = content.replace(hostTag, newHostTag);
+      fs.writeFileSync(serverXmlPath, content, 'utf8');
+      outputChannel?.appendLine(
+        '[Tomcat] Excluding default webapps (ROOT/docs/examples/host-manager) from auto-deploy.'
+      );
+    } catch (err) {
+      outputChannel?.appendLine(`[Tomcat] Failed to apply deployIgnore: ${err}`);
+    }
+  }
+
   // ---------- lifecycle ----------
 
   async start(id: string, debug: boolean): Promise<void> {
@@ -309,6 +402,33 @@ export class ServerManager {
       } catch {
         // ignore permission errors
       }
+    }
+
+    const outputChannel = vscode.window.createOutputChannel(`Tomcat: ${server.name}`);
+    outputChannel.clear();
+    outputChannel.show(true);
+    outputChannel.appendLine(`[Tomcat] Preparing to start ${server.name}...`);
+
+    if (this.isExcludeDefaultWebappsEnabled()) {
+      this.applyDeployIgnore(server.homePath, outputChannel);
+    }
+
+    // Start (or refresh) live source-link watchers for any exploded app with an overlay
+    // configured, and - if enabled - run a fresh Maven/Gradle compile now and WAIT for it to
+    // finish, so Tomcat boots against up-to-date classes/resources rather than whatever
+    // happened to be built last (mirrors "build, then run" like an IDE run configuration).
+    const prebuildTasks: Promise<void>[] = [];
+    for (const app of server.deployedApps) {
+      if (app.type === 'exploded' && app.sourceOverlayPath) {
+        this.startSourceSync(id, app.contextPath, app.sourceOverlayPath, app.sourcePath);
+        prebuildTasks.push(
+          this.maybeStartJavaBuildSync(id, app.contextPath, app.sourcePath, app.sourceOverlayPath, true, outputChannel)
+        );
+      }
+    }
+    if (prebuildTasks.length > 0) {
+      outputChannel.appendLine('[Tomcat] Running pre-start build for Maven/Gradle app(s)...');
+      await Promise.all(prebuildTasks);
     }
 
     const env: NodeJS.ProcessEnv = {
@@ -337,9 +457,6 @@ export class ServerManager {
       args.unshift('jpda');
     }
 
-    const outputChannel = vscode.window.createOutputChannel(`Tomcat: ${server.name}`);
-    outputChannel.clear();
-    outputChannel.show(true);
     outputChannel.appendLine(`[Tomcat] Starting ${server.name} (${debug ? 'debug' : 'run'}) using ${script} ${args.join(' ')}`);
     outputChannel.appendLine(`[Tomcat] JAVA_HOME = ${env.JAVA_HOME ?? '(system default)'}`);
     outputChannel.appendLine(`[Tomcat] Log level = ${effectiveLogLevel}`);
@@ -355,16 +472,6 @@ export class ServerManager {
     const info: RunningInfo = { proc, status: 'starting', outputChannel };
     this.running.set(id, info);
     this._onDidChange.fire();
-
-    // Start (or refresh) live source-sync watchers for any exploded app with an overlay
-    // configured, so docBase is up to date before/while Tomcat deploys it. Also kicks off
-    // Java/resource auto-compile watching for Maven/Gradle projects, if enabled.
-    for (const app of server.deployedApps) {
-      if (app.type === 'exploded' && app.sourceOverlayPath) {
-        this.startSourceSync(id, app.contextPath, app.sourceOverlayPath, app.sourcePath);
-        this.maybeStartJavaBuildSync(id, app.contextPath, app.sourcePath, app.sourceOverlayPath);
-      }
-    }
 
     proc.stdout.on('data', (d: Buffer) => {
       const text = d.toString();
@@ -563,7 +670,7 @@ export class ServerManager {
 
     if (sourceOverlayPath) {
       this.startSourceSync(id, resolvedPath, sourceOverlayPath, folderPath);
-      this.maybeStartJavaBuildSync(id, resolvedPath, folderPath, sourceOverlayPath);
+      await this.maybeStartJavaBuildSync(id, resolvedPath, folderPath, sourceOverlayPath, true);
     }
   }
 
@@ -596,7 +703,7 @@ export class ServerManager {
 
     if (overlayPath) {
       this.startSourceSync(id, contextPath, overlayPath, app.sourcePath);
-      this.maybeStartJavaBuildSync(id, contextPath, app.sourcePath, overlayPath);
+      await this.maybeStartJavaBuildSync(id, contextPath, app.sourcePath, overlayPath, true);
     } else {
       this.stopSourceSync(id, contextPath);
       this.stopJavaBuildSync(id, contextPath);
