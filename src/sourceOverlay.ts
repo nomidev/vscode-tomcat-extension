@@ -81,6 +81,14 @@ export interface BuildInfo {
   resourcesSrcDir: string;
 }
 
+/** Quote executable paths so configured commands under `Program Files` work in CMD. */
+function shellCommand(executable: string, args: string[]): string {
+  const quotedExecutable = /[\s"]/ .test(executable)
+    ? `"${executable.replace(/"/g, '\\"')}"`
+    : executable;
+  return [quotedExecutable, ...args].join(' ');
+}
+
 /**
  * Detects whether `projectRoot` is a Maven or Gradle project and, if so, returns the info
  * needed to auto-compile Java changes and locate the resulting output. Prefers the project's
@@ -101,7 +109,7 @@ export function detectBuildInfo(
     return {
       tool: 'maven',
       projectRoot,
-      buildCommand: `${cmd} compile -q`,
+      buildCommand: shellCommand(cmd, ['compile']),
       // Maven's `compile` phase runs `process-resources` first, so target/classes ends up
       // with both compiled .class files and copied resources in one place.
       classesOutDirs: [path.join(projectRoot, 'target', 'classes')],
@@ -121,7 +129,7 @@ export function detectBuildInfo(
       tool: 'gradle',
       projectRoot,
       // `classes` compiles Java AND processes resources for the main source set.
-      buildCommand: `${cmd} classes -q`,
+      buildCommand: shellCommand(cmd, ['classes']),
       // Gradle keeps compiled classes and processed resources in separate output folders.
       classesOutDirs: [
         path.join(projectRoot, 'build', 'classes', 'java', 'main'),

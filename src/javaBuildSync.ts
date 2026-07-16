@@ -94,6 +94,10 @@ export class JavaBuildSyncWatcher {
     this.log(`[build] running: ${this.buildInfo.buildCommand}`);
 
     const env: NodeJS.ProcessEnv = { ...process.env };
+    // Make Maven's JVM diagnostics UTF-8; otherwise Korean Windows console output is
+    // decoded as UTF-8 by Node and becomes unreadable in the VS Code output channel.
+    const utf8Options = '-Dfile.encoding=UTF-8 -Dsun.stdout.encoding=UTF-8 -Dsun.stderr.encoding=UTF-8';
+    env.JAVA_TOOL_OPTIONS = [env.JAVA_TOOL_OPTIONS, utf8Options].filter(Boolean).join(' ');
     if (this.javaHome) {
       env.JAVA_HOME = this.javaHome;
       const javaBin = path.join(this.javaHome, 'bin');

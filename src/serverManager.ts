@@ -79,7 +79,7 @@ export class ServerManager {
   /** Whether Java/resource changes should be auto-compiled and synced into WEB-INF/classes
    *  whenever the live source overlay is enabled for a Maven/Gradle app. */
   isJavaAutoBuildEnabled(): boolean {
-    return vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>('javaAutoBuild', true);
+    return vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>('javaAutoBuild', false);
   }
 
   private getMavenCommand(): string {
@@ -221,40 +221,6 @@ export class ServerManager {
   }
 
   /**
-   * Manually triggers an immediate Java/resource compile + sync for a deployed exploded app,
-   * for diagnosing/forcing the auto-build-on-change feature on demand. Returns a reason
-   * string (no watcher, no Maven/Gradle project detected, auto-build disabled, etc.) when it
-   * can't run at all, distinct from a build that ran but failed (whose output goes to the
-   * server's output channel as usual).
-   */
-  async forceRebuild(serverId: string, contextPath: string): Promise<{ ok: boolean; reason?: string }> {
-    const server = this.getServer(serverId);
-    if (!server) return { ok: false, reason: '서버를 찾을 수 없습니다.' };
-    const app = server.deployedApps.find(a => a.contextPath === contextPath);
-    if (!app || app.type !== 'exploded') return { ok: false, reason: 'exploded 배포가 아닙니다.' };
-    if (!app.sourceOverlayPath) return { ok: false, reason: '라이브 소스 리로드가 활성화되어 있지 않습니다.' };
-    if (!this.isJavaAutoBuildEnabled()) return { ok: false, reason: '"tomcat.javaAutoBuild" 설정이 꺼져 있습니다.' };
-
-    const projectRoot = findProjectRoot(app.sourceOverlayPath) ?? findProjectRoot(app.sourcePath);
-    if (!projectRoot) return { ok: false, reason: 'Maven/Gradle 프로젝트 루트(pom.xml/build.gradle)를 찾지 못했습니다.' };
-
-    const buildInfo = detectBuildInfo(projectRoot, this.getMavenCommand(), this.getGradleCommand());
-    if (!buildInfo) return { ok: false, reason: 'Maven/Gradle 빌드 정보를 감지하지 못했습니다.' };
-
-    let watcher = this.buildWatchers.get(this.syncKey(serverId, contextPath));
-    if (!watcher) {
-      const outputChannel = this.running.get(serverId)?.outputChannel;
-      const classesTargetDir = path.join(app.sourcePath, 'WEB-INF', 'classes');
-      watcher = new JavaBuildSyncWatcher(buildInfo, classesTargetDir, msg => outputChannel?.appendLine(msg), server.javaHome);
-      watcher.start();
-      this.buildWatchers.set(this.syncKey(serverId, contextPath), watcher);
-    }
-
-    const success = await watcher.buildOnce();
-    return { ok: success };
-  }
-
-  /**
    * If Java auto-build is enabled and `overlayPath`/`docBase` sit inside a detectable
    * Maven/Gradle project, starts (or restarts) a watcher that recompiles Java changes and
    * syncs the result into `docBase/WEB-INF/classes`. Silently does nothing if auto-build is
@@ -268,10 +234,19 @@ export class ServerManager {
     docBase: string,
     overlayPath: string,
     runInitialBuild = false,
-    outputChannelOverride?: vscode.OutputChannel
+    outputChannelOverride?: vscode.OutputChannel,
+    debug = false
   ): Promise<void> {
     this.stopJavaBuildSync(serverId, contextPath);
     if (!this.isJavaAutoBuildEnabled()) return;
+
+    const outputChannel = outputChannelOverride ?? this.running.get(serverId)?.outputChannel;
+    if (debug) {
+      outputChannel?.appendLine('[HotSwap] Debug mode: Maven/Gradle auto-build is disabled.');
+      outputChannel?.appendLine('[HotSwap] Save Java files through the VS Code Java debugger to hot-swap method-body changes.');
+      outputChannel?.appendLine('[HotSwap] Adding/removing fields, methods, or classes still requires a rebuild and Tomcat restart.');
+      return;
+    }
 
     const projectRoot = findProjectRoot(overlayPath) ?? findProjectRoot(docBase);
     if (!projectRoot) return;
@@ -279,7 +254,6 @@ export class ServerManager {
     const buildInfo = detectBuildInfo(projectRoot, this.getMavenCommand(), this.getGradleCommand());
     if (!buildInfo) return;
 
-    const outputChannel = outputChannelOverride ?? this.running.get(serverId)?.outputChannel;
     const classesTargetDir = path.join(docBase, 'WEB-INF', 'classes');
     const watcher = new JavaBuildSyncWatcher(
       buildInfo,
@@ -414,21 +388,32 @@ export class ServerManager {
     }
 
     // Start (or refresh) live source-link watchers for any exploded app with an overlay
-    // configured, and - if enabled - run a fresh Maven/Gradle compile now and WAIT for it to
-    // finish, so Tomcat boots against up-to-date classes/resources rather than whatever
-    // happened to be built last (mirrors "build, then run" like an IDE run configuration).
-    const prebuildTasks: Promise<void>[] = [];
+    // configured. We do not run a fresh Maven/Gradle compile before startup, because some
+    // projects fail at that step and the server should still be able to start.
+    const effectiveDebug = debug;
+
     for (const app of server.deployedApps) {
       if (app.type === 'exploded' && app.sourceOverlayPath) {
         this.startSourceSync(id, app.contextPath, app.sourceOverlayPath, app.sourcePath);
-        prebuildTasks.push(
-          this.maybeStartJavaBuildSync(id, app.contextPath, app.sourcePath, app.sourceOverlayPath, true, outputChannel)
-        );
+        if (effectiveDebug) {
+          this.stopJavaBuildSync(id, app.contextPath);
+        } else {
+          await this.maybeStartJavaBuildSync(
+            id,
+            app.contextPath,
+            app.sourcePath,
+            app.sourceOverlayPath,
+            false,
+            outputChannel,
+            false
+          );
+        }
       }
     }
-    if (prebuildTasks.length > 0) {
-      outputChannel.appendLine('[Tomcat] Running pre-start build for Maven/Gradle app(s)...');
-      await Promise.all(prebuildTasks);
+    if (debug) {
+      outputChannel.appendLine('[HotSwap] Debug mode: Maven/Gradle auto-build은 비활성화됩니다.');
+      outputChannel.appendLine('[HotSwap] Java 파일 저장 시 VS Code Java 디버거가 변경사항을 핫스왑하도록 연결됩니다.');
+      outputChannel.appendLine('[HotSwap] 필드/메서드/클래스 추가/제거는 여전히 재시작이 필요할 수 있습니다.');
     }
 
     const env: NodeJS.ProcessEnv = {
@@ -451,13 +436,15 @@ export class ServerManager {
     this.applyLogLevel(server.homePath, effectiveLogLevel);
 
     const args = ['run'];
-    if (debug) {
+    if (effectiveDebug) {
       env.JPDA_ADDRESS = String(server.debugPort);
       env.JPDA_TRANSPORT = 'dt_socket';
       args.unshift('jpda');
     }
 
-    outputChannel.appendLine(`[Tomcat] Starting ${server.name} (${debug ? 'debug' : 'run'}) using ${script} ${args.join(' ')}`);
+    outputChannel.appendLine(
+      `[Tomcat] Starting ${server.name} (${effectiveDebug ? 'debug' : 'run'}) using ${script} ${args.join(' ')}`
+    );
     outputChannel.appendLine(`[Tomcat] JAVA_HOME = ${env.JAVA_HOME ?? '(system default)'}`);
     outputChannel.appendLine(`[Tomcat] Log level = ${effectiveLogLevel}`);
     outputChannel.appendLine(`[Tomcat] CATALINA_OPTS = ${env.CATALINA_OPTS ?? '(none)'}`);
@@ -466,7 +453,7 @@ export class ServerManager {
       env,
       cwd: server.homePath,
       detached: process.platform !== 'win32',
-      shell: process.platform === 'win32'
+      shell: true
     });
 
     const info: RunningInfo = { proc, status: 'starting', outputChannel };
@@ -477,9 +464,9 @@ export class ServerManager {
       const text = d.toString();
       outputChannel.append(text);
       if (/Server startup in/.test(text) || /INFO.*Starting ProtocolHandler/.test(text)) {
-        info.status = debug ? 'debugging' : 'running';
+        info.status = effectiveDebug ? 'debugging' : 'running';
         this._onDidChange.fire();
-        if (debug) {
+        if (effectiveDebug) {
           this.attachDebugger(server);
         }
       }
@@ -507,7 +494,7 @@ export class ServerManager {
     // Safety net: if we never see the startup banner within 20s, assume running.
     setTimeout(() => {
       if (info.status === 'starting') {
-        info.status = debug ? 'debugging' : 'running';
+        info.status = effectiveDebug ? 'debugging' : 'running';
         this._onDidChange.fire();
       }
     }, 20000);
@@ -670,7 +657,15 @@ export class ServerManager {
 
     if (sourceOverlayPath) {
       this.startSourceSync(id, resolvedPath, sourceOverlayPath, folderPath);
-      await this.maybeStartJavaBuildSync(id, resolvedPath, folderPath, sourceOverlayPath, true);
+      await this.maybeStartJavaBuildSync(
+        id,
+        resolvedPath,
+        folderPath,
+        sourceOverlayPath,
+        false,
+        undefined,
+        false
+      );
     }
   }
 
@@ -703,7 +698,15 @@ export class ServerManager {
 
     if (overlayPath) {
       this.startSourceSync(id, contextPath, overlayPath, app.sourcePath);
-      await this.maybeStartJavaBuildSync(id, contextPath, app.sourcePath, overlayPath, true);
+      await this.maybeStartJavaBuildSync(
+        id,
+        contextPath,
+        app.sourcePath,
+        overlayPath,
+        false,
+        undefined,
+        false
+      );
     } else {
       this.stopSourceSync(id, contextPath);
       this.stopJavaBuildSync(id, contextPath);

@@ -6,7 +6,7 @@ import { TomcatTreeProvider, ServerTreeItem, AppTreeItem } from './tomcatTreePro
 import { findMetaInfContext, parseMetaInfContext } from './contextXml';
 import { LOG_LEVELS } from './model';
 import { detectWebappSource } from './sourceOverlay';
-import { hasManagerApp, ensureManagerUser, resetManagerUser, reloadContext } from './tomcatManager';
+import { resetManagerUser } from './tomcatManager';
 
 let activeManager: ServerManager | undefined;
 
@@ -439,64 +439,6 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.env.openExternal(vscode.Uri.parse(url));
   });
 
-  reg('tomcat.reloadContext', async (item: AppTreeItem) => {
-    if (!item) return;
-    const status = manager.getStatus(item.server.id);
-    if (status !== 'running' && status !== 'debugging') {
-      vscode.window.showInformationMessage('서버가 실행 중이 아닙니다. 먼저 시작하세요.');
-      return;
-    }
-    if (!hasManagerApp(item.server.homePath)) {
-      vscode.window.showWarningMessage(
-        '이 Tomcat 설치에는 Manager 웹앱(webapps/manager)이 포함되어 있지 않아 즉시 리로드를 사용할 수 없습니다. ' +
-          '전체 배포판(full/core zip)에는 기본 포함되어 있으니 설치본을 확인해주세요.'
-      );
-      return;
-    }
-
-    const creds = await ensureManagerUser(item.server, context.secrets);
-    if (creds.justProvisioned) {
-      const choice = await vscode.window.showInformationMessage(
-        '즉시 리로드에 필요한 Tomcat Manager 계정을 새로 만들었습니다 (conf/tomcat-users.xml). ' +
-          '최초 1회는 서버를 재시작해야 활성화됩니다. 지금 재시작할까요? (이후부터는 재시작 없이 즉시 리로드할 수 있습니다)',
-        '지금 재시작',
-        '나중에'
-      );
-      if (choice === '지금 재시작') {
-        await manager.restart(item.server.id, status === 'debugging');
-        vscode.window.showInformationMessage('재시작 완료. 이제 "Reload Context Now" 로 전체 재시작 없이 즉시 반영할 수 있습니다.');
-      }
-      return;
-    }
-
-    const result = await reloadContext(item.server, creds, item.app.contextPath);
-    const channel = manager.getOutputChannel(item.server.id);
-    channel?.appendLine(`[manager] reload ${item.app.contextPath || '/'}: ${result.message}`);
-
-    if (result.ok) {
-      vscode.window.showInformationMessage(`"${item.app.contextPath}" 를 즉시 리로드했습니다 (전체 서버 재시작 없음).`);
-      return;
-    }
-
-    if (result.statusCode === 401) {
-      const choice = await vscode.window.showErrorMessage(
-        'Tomcat Manager 인증에 실패했습니다 (401 Unauthorized). 저장된 계정 정보가 서버의 tomcat-users.xml 과 어긋난 것 같습니다.',
-        '자격 증명 초기화 후 재시작',
-        '취소'
-      );
-      if (choice === '자격 증명 초기화 후 재시작') {
-        await resetManagerUser(item.server, context.secrets);
-        await manager.restart(item.server.id, status === 'debugging');
-        vscode.window.showInformationMessage(
-          'Manager 계정을 새로 만들고 서버를 재시작했습니다. 잠시 후(서버가 완전히 기동되면) "Reload Context Now" 를 다시 시도해주세요.'
-        );
-      }
-      return;
-    }
-
-    vscode.window.showErrorMessage(`리로드 실패: ${result.message}`);
-  });
-
   reg('tomcat.resetManagerCredentials', async (item: ServerTreeItem) => {
     if (!item) return;
     const confirm = await vscode.window.showWarningMessage(
@@ -522,28 +464,6 @@ export function activate(context: vscode.ExtensionContext) {
     }
   });
 
-  reg('tomcat.forceRebuild', async (item: AppTreeItem) => {
-    if (!item || item.app.type !== 'exploded') return;
-    const channel = manager.getOutputChannel(item.server.id);
-    channel?.show(true);
-    channel?.appendLine(`[build] Force Rebuild Now 실행: ${item.app.contextPath || '/'}`);
-
-    const result = await manager.forceRebuild(item.server.id, item.app.contextPath);
-    if (result.reason) {
-      vscode.window.showWarningMessage(`빌드를 실행할 수 없습니다: ${result.reason}`);
-      return;
-    }
-    if (result.ok) {
-      vscode.window.showInformationMessage(
-        `"${item.app.contextPath}" 컴파일 및 WEB-INF/classes 동기화가 완료되었습니다.`
-      );
-    } else {
-      vscode.window.showErrorMessage(
-        `빌드가 실패했습니다. 출력 채널("Tomcat: ${item.server.name}")에서 자세한 로그를 확인하세요 ` +
-          `(mvn/gradle이 PATH에 없는 경우가 흔한 원인입니다).`
-      );
-    }
-  });
 }
 
 export async function deactivate(): Promise<void> {
