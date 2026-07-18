@@ -60,17 +60,28 @@ export class JavaBuildSyncWatcher {
 
   /** Re-syncs everything immediately (used right before Tomcat starts, and by the manual
    *  "Force Resync Classes Now" command). No build is run - this just copies whatever is
-   *  already sitting in the output folder(s) right now. */
+   *  already sitting in the output folder(s) right now. Returns false if any output folder
+   *  failed to sync (see syncAll), so callers like "Force Resync Classes Now" can actually
+   *  tell the difference between "nothing to sync yet" and "something went wrong". */
   async buildOnce(): Promise<boolean> {
+    let allOk = true;
     for (const dir of this.buildInfo.classesOutDirs) {
-      this.syncAll(dir);
+      if (!this.syncAll(dir)) allOk = false;
     }
-    return true;
+    return allOk;
   }
 
-  private syncAll(outDir: string): void {
-    if (fs.existsSync(outDir)) {
+  private syncAll(outDir: string): boolean {
+    if (!fs.existsSync(outDir)) return true; // nothing to sync yet isn't a failure
+    try {
       copyDirRecursive(outDir, this.classesTargetDir);
+      return true;
+    } catch (err) {
+      // A locked .class file (e.g. actively held open on Windows) or a permission hiccup
+      // must not take down the whole sync - let alone Tomcat's entire startup sequence,
+      // which awaits this. Log and move on; the next change event will retry.
+      this.log(`[classes-sync] error syncing ${outDir} -> ${this.classesTargetDir}: ${err}`);
+      return false;
     }
   }
 

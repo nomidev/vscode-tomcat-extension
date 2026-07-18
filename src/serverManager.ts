@@ -428,7 +428,15 @@ export class ServerManager {
     }
     if (presyncTasks.length > 0) {
       outputChannel.appendLine('[Tomcat] Syncing compiled classes/resources for Maven/Gradle app(s)...');
-      await Promise.all(presyncTasks);
+      try {
+        await Promise.all(presyncTasks);
+      } catch (err) {
+        // Defense in depth: a sync/link failure for one app must never prevent Tomcat itself
+        // from starting - log it and keep going. (maybeStartJavaBuildSync/JavaBuildSyncWatcher
+        // already catch their own copy errors, but this is a last-resort safety net in case
+        // something unanticipated throws here.)
+        outputChannel.appendLine(`[Tomcat] Warning: pre-start sync had an error, continuing anyway: ${err}`);
+      }
     }
 
     const env: NodeJS.ProcessEnv = {

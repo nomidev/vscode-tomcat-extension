@@ -26,8 +26,22 @@ export function activate(context: vscode.ExtensionContext) {
   });
   context.subscriptions.push(explorerTreeView);
 
+  // Wraps every command handler so an unexpected exception anywhere (a filesystem error, a
+  // bad state assumption, etc.) always surfaces as a clear message instead of failing
+  // silently or with just a generic "command failed" notification - the debugger-attach bug
+  // earlier in this session was exactly this class of problem (a failure with no visible
+  // error at all), so this is a blanket safety net against the same thing happening elsewhere.
   const reg = (cmd: string, handler: (...args: any[]) => any) =>
-    context.subscriptions.push(vscode.commands.registerCommand(cmd, handler));
+    context.subscriptions.push(
+      vscode.commands.registerCommand(cmd, async (...args: any[]) => {
+        try {
+          return await handler(...args);
+        } catch (err: any) {
+          const message = err?.message ?? String(err);
+          vscode.window.showErrorMessage(`Tomcat: "${cmd}" 실행 중 오류가 발생했습니다: ${message}`);
+        }
+      })
+    );
 
   /**
    * If the server is currently running (or debugging), restart it automatically so that
