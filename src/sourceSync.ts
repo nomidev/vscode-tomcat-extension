@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { copyDirRecursive, safeReadDir, watchRecursive, RecursiveWatchHandle } from './recursiveWatch';
+import { copyDirRecursive, safeReadDir } from './recursiveWatch';
 
 type Logger = (message: string) => void;
 
@@ -27,7 +27,8 @@ const PRESERVE_IN_WEBINF = new Set(['classes', 'lib']);
  * for whichever specific entries needed the fallback.
  */
 export class SourceSyncWatcher {
-  private watcher: RecursiveWatchHandle | undefined;
+  private topWatcher: fs.FSWatcher | undefined;
+  private webInfWatcher: fs.FSWatcher | undefined;
 
   constructor(private sourceDir: string, private targetDir: string, private log: Logger = () => {}) {}
 
@@ -41,15 +42,26 @@ export class SourceSyncWatcher {
     this.syncTopLevel();
 
     try {
-      this.watcher = watchRecursive(this.sourceDir, () => this.syncTopLevel(), this.log);
+      this.topWatcher = fs.watch(this.sourceDir, () => this.syncTopLevel());
     } catch (err) {
       this.log(`[link] failed to watch ${this.sourceDir}: ${err}`);
+    }
+
+    const webInf = path.join(this.sourceDir, 'WEB-INF');
+    if (fs.existsSync(webInf)) {
+      try {
+        this.webInfWatcher = fs.watch(webInf, () => this.syncTopLevel());
+      } catch {
+        // non-fatal - top-level entries already linked still work fine
+      }
     }
   }
 
   stop(): void {
-    this.watcher?.close();
-    this.watcher = undefined;
+    this.topWatcher?.close();
+    this.topWatcher = undefined;
+    this.webInfWatcher?.close();
+    this.webInfWatcher = undefined;
   }
 
   /**

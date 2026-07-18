@@ -4,9 +4,9 @@ import * as fs from 'fs';
 import { ServerManager } from './serverManager';
 import { TomcatTreeProvider, ServerTreeItem, AppTreeItem } from './tomcatTreeProvider';
 import { findMetaInfContext, parseMetaInfContext } from './contextXml';
-import { LOG_LEVELS } from './model';
+import { LOG_LEVELS, TomcatServerConfig } from './model';
 import { detectWebappSource } from './sourceOverlay';
-import { resetManagerUser } from './tomcatManager';
+import { hasManagerApp, ensureManagerUser, resetManagerUser, reloadContext } from './tomcatManager';
 
 let activeManager: ServerManager | undefined;
 
@@ -41,6 +41,90 @@ export function activate(context: vscode.ExtensionContext) {
       return true;
     }
     return false;
+  }
+
+  /**
+   * Forces a currently-running server to actually pick up a context.xml change (e.g. a
+   * reloadable/live-overlay toggle) via the Manager API's "reload", the same thing the
+   * explicit "Reload Context Now" command does. Attribute-only changes like `reloadable` are
+   * only read by Tomcat when a context (re)loads - rewriting context.xml on disk alone does
+   * NOT make an already-running server notice by itself, so callers that change these
+   * settings must call this afterwards or the change silently won't take effect until the
+   * next restart. Handles first-time Manager credential setup and quietly recovers from a
+   * stale/invalid credential (401) the same way the explicit command does. Set `quiet: true`
+   * to skip the final success toast (e.g. when this is a side-effect of another action that
+   * already shows its own confirmation).
+   */
+  async function ensureContextReloaded(
+    server: TomcatServerConfig,
+    contextPath: string,
+    options: { quiet?: boolean } = {}
+  ): Promise<void> {
+    const status = manager.getStatus(server.id);
+    if (status !== 'running' && status !== 'debugging') {
+      return; // nothing to do - a fresh start will already pick up the current context.xml
+    }
+
+    if (!hasManagerApp(server.homePath)) {
+      vscode.window.showWarningMessage(
+        `이 Tomcat 설치에는 Manager 웹앱이 없어 "${contextPath}" 변경사항을 지금 서버에 자동으로 적용할 수 없습니다. ` +
+          '서버를 재시작하면 반영됩니다.'
+      );
+      return;
+    }
+
+    const creds = await ensureManagerUser(server, context.secrets);
+    if (creds.justProvisioned) {
+      const choice = await vscode.window.showInformationMessage(
+        `"${contextPath}" 변경사항을 지금 서버에 반영하려면 Tomcat Manager 계정이 필요한데, 방금 새로 만들었습니다. ` +
+          '최초 1회는 서버를 재시작해야 활성화됩니다. 지금 재시작할까요?',
+        '지금 재시작',
+        '나중에'
+      );
+      if (choice === '지금 재시작') {
+        await manager.restart(server.id, status === 'debugging');
+        vscode.window.showInformationMessage('재시작 완료. 변경사항이 반영되었습니다.');
+      } else {
+        vscode.window.showWarningMessage(
+          `설정은 저장됐지만, 서버를 재시작하거나 나중에 "Reload Context Now" 를 눌러야 실제로 적용됩니다.`
+        );
+      }
+      return;
+    }
+
+    const result = await reloadContext(server, creds, contextPath);
+    const channel = manager.getOutputChannel(server.id);
+    channel?.appendLine(`[manager] reload ${contextPath || '/'}: ${result.message}`);
+
+    if (result.ok) {
+      if (!options.quiet) {
+        vscode.window.showInformationMessage(`"${contextPath}" 를 즉시 리로드해 변경사항을 반영했습니다.`);
+      }
+      return;
+    }
+
+    if (result.statusCode === 401) {
+      const choice = await vscode.window.showErrorMessage(
+        `"${contextPath}" 를 반영하려던 중 Tomcat Manager 인증에 실패했습니다 (401). 저장된 계정 정보가 서버와 어긋난 것 같습니다.`,
+        '자격 증명 초기화 후 재시작',
+        '취소'
+      );
+      if (choice === '자격 증명 초기화 후 재시작') {
+        await resetManagerUser(server, context.secrets);
+        await manager.restart(server.id, status === 'debugging');
+        vscode.window.showInformationMessage('Manager 계정을 새로 만들고 서버를 재시작했습니다. 변경사항이 반영되었습니다.');
+      } else {
+        vscode.window.showWarningMessage(
+          `설정은 저장됐지만, 서버를 재시작하거나 "Reload Context Now" 를 다시 시도해야 실제로 적용됩니다.`
+        );
+      }
+      return;
+    }
+
+    vscode.window.showWarningMessage(
+      `"${contextPath}" 를 지금 서버에 반영하지 못했습니다 (${result.message}). 설정은 저장됐으니, ` +
+        `서버를 재시작하거나 "Reload Context Now" 를 다시 시도해주세요.`
+    );
   }
 
   reg('tomcat.refresh', () => treeProvider.refresh());
@@ -128,6 +212,13 @@ export function activate(context: vscode.ExtensionContext) {
     if (debugPortStr === undefined) return;
 
     await manager.updatePorts(item.server.id, parseInt(httpPortStr, 10), parseInt(debugPortStr, 10));
+    vscode.window.showInformationMessage(
+      `${item.server.name} 의 포트가 HTTP ${httpPortStr} / Debug ${debugPortStr} 로 설정되었습니다. 포트는 서버 시작 시에만 적용되는 설정이라, 다음 시작/재시작 시 반영됩니다.`
+    );
+    const restarted = await applyChangesIfRunning(item.server.id);
+    if (restarted) {
+      vscode.window.showInformationMessage('실행 중인 서버를 자동으로 재시작해 새 포트를 적용했습니다.');
+    }
   });
 
   reg('tomcat.editJavaHome', async (item: ServerTreeItem) => {
@@ -149,7 +240,13 @@ export function activate(context: vscode.ExtensionContext) {
 
     if (pick.value === 'clear') {
       await manager.updateJavaHome(item.server.id, undefined);
-      vscode.window.showInformationMessage(`${item.server.name} 이(가) 시스템 기본 JAVA_HOME 을 사용하도록 설정되었습니다.`);
+      vscode.window.showInformationMessage(
+        `${item.server.name} 이(가) 시스템 기본 JAVA_HOME 을 사용하도록 설정되었습니다. JAVA_HOME 은 서버 시작 시에만 적용되는 설정이라, 다음 시작/재시작 시 반영됩니다.`
+      );
+      const restarted = await applyChangesIfRunning(item.server.id);
+      if (restarted) {
+        vscode.window.showInformationMessage('실행 중인 서버를 자동으로 재시작해 적용했습니다.');
+      }
       return;
     }
 
@@ -175,7 +272,13 @@ export function activate(context: vscode.ExtensionContext) {
     }
 
     await manager.updateJavaHome(item.server.id, javaHome);
-    vscode.window.showInformationMessage(`${item.server.name} 의 JAVA_HOME 이 "${javaHome}" 으로 설정되었습니다.`);
+    vscode.window.showInformationMessage(
+      `${item.server.name} 의 JAVA_HOME 이 "${javaHome}" 으로 설정되었습니다. JAVA_HOME 은 서버 시작 시에만 적용되는 설정이라, 다음 시작/재시작 시 반영됩니다.`
+    );
+    const restarted = await applyChangesIfRunning(item.server.id);
+    if (restarted) {
+      vscode.window.showInformationMessage('실행 중인 서버를 자동으로 재시작해 적용했습니다.');
+    }
   });
 
   reg('tomcat.setLogLevel', async (item: ServerTreeItem) => {
@@ -350,13 +453,34 @@ export function activate(context: vscode.ExtensionContext) {
       }
     }
 
+    let reloadable: boolean | undefined;
+    if (sourceOverlayPath) {
+      const reloadPick = await vscode.window.showQuickPick(
+        [
+          {
+            label: '$(circle-slash) 자동 컨텍스트 리로드 끄기 (권장 - 디버거로 실행 중일 때)',
+            detail: '메서드 본문 변경은 디버거 핫스왑으로 조용히·즉시 반영됩니다. 필드/메서드/클래스 추가 같은 구조적 변경은 "Reload Context Now" 로 수동 반영합니다.',
+            value: false
+          },
+          {
+            label: '$(sync) 자동 컨텍스트 리로드 켜기 (디버거 없이 실행할 때)',
+            detail: '클래스가 바뀔 때마다 Tomcat 이 앱 컨텍스트 전체를 자동으로 다시 로드합니다(세션 등 상태 초기화됨). 디버거 없이도 모든 변경이 자동 반영되지만, 매번 다소 무겁습니다.',
+            value: true
+          }
+        ],
+        { placeHolder: '이 앱을 보통 디버그 모드(JPDA)로 실행하시나요, 아니면 일반 Start 로 실행하시나요?' }
+      );
+      reloadable = reloadPick?.value ?? false;
+    }
+
     await manager.deployExploded(
       item.server.id,
       folderPath,
       contextPath,
       useDetected ? detected?.attributes : undefined,
       useDetected ? detected?.innerXml : undefined,
-      sourceOverlayPath
+      sourceOverlayPath,
+      reloadable
     );
     const running = manager.getStatus(item.server.id) !== 'stopped';
     vscode.window.showInformationMessage(
@@ -366,7 +490,10 @@ export function activate(context: vscode.ExtensionContext) {
           ? 'Tomcat 이 자동으로(보통 수 초 내) 감지해 배포합니다. 전체 서버 재시작은 필요 없습니다.'
           : '서버를 시작하면 반영됩니다.') +
         (sourceOverlayPath
-          ? ' JSP/정적 파일은 이후 저장 즉시 반영되고, Java/리소스 변경 시에도 자동 컴파일 후 WEB-INF/classes 에 반영됩니다.'
+          ? ` JSP/정적 파일은 이후 저장 즉시 반영되고, target/classes(또는 build/classes 등)에 컴파일된 클래스/리소스도 변경 즉시 WEB-INF/classes 로 자동 동기화됩니다(컴파일 자체는 VSCode의 Java 자동 빌드 등 기존 빌드 도구가 담당). ` +
+            (reloadable
+              ? '자동 컨텍스트 리로드가 켜져 있어 클래스 변경 시 Tomcat 이 컨텍스트를 자동으로 다시 로드합니다.'
+              : '자동 컨텍스트 리로드는 꺼져있어(reloadable=false) 메서드 본문 변경은 디버거 핫스왑으로, 필드/메서드/클래스 추가 같은 구조적 변경은 "Reload Context Now" 로 반영하세요.')
           : ' IntelliJ 처럼 이후 재빌드 시에는 서버 재시작 없이 즉시 반영됩니다.')
     );
   });
@@ -408,12 +535,54 @@ export function activate(context: vscode.ExtensionContext) {
       overlayPath = undefined;
     }
 
-    await manager.setSourceOverlay(item.server.id, item.app.contextPath, overlayPath);
+    let reloadable: boolean | undefined;
+    if (overlayPath) {
+      const reloadPick = await vscode.window.showQuickPick(
+        [
+          {
+            label: '$(circle-slash) 자동 컨텍스트 리로드 끄기 (권장 - 디버거로 실행 중일 때)',
+            detail: '메서드 본문 변경은 디버거 핫스왑으로 조용히·즉시 반영됩니다. 필드/메서드/클래스 추가 같은 구조적 변경은 "Reload Context Now" 로 수동 반영합니다.',
+            value: false
+          },
+          {
+            label: '$(sync) 자동 컨텍스트 리로드 켜기 (디버거 없이 실행할 때)',
+            detail: '클래스가 바뀔 때마다 Tomcat 이 앱 컨텍스트 전체를 자동으로 다시 로드합니다(세션 등 상태 초기화됨). 디버거 없이도 모든 변경이 자동 반영되지만, 매번 다소 무겁습니다.',
+            value: true
+          }
+        ],
+        {
+          placeHolder: '이 앱을 보통 디버그 모드(JPDA)로 실행하시나요, 아니면 일반 Start 로 실행하시나요?'
+        }
+      );
+      if (!reloadPick) return;
+      reloadable = reloadPick.value;
+    }
+
+    await manager.setSourceOverlay(item.server.id, item.app.contextPath, overlayPath, reloadable);
     vscode.window.showInformationMessage(
       overlayPath
-        ? `"${item.app.contextPath}" 에 라이브 소스 오버레이가 적용되었습니다 (${overlayPath}). 서버 재시작 없이 바로 동작합니다 — 이후 JSP/정적 파일 저장 시 즉시 반영되고, Java/리소스 변경 시에도 자동 컴파일 후 WEB-INF/classes 에 반영됩니다.`
+        ? `"${item.app.contextPath}" 에 라이브 소스 오버레이가 적용되었습니다 (${overlayPath}). 서버 재시작 없이 바로 동작합니다 — JSP/정적 파일은 저장 즉시 반영되고, 컴파일된 클래스/리소스도 WEB-INF/classes 로 즉시 동기화됩니다. ` +
+          (reloadable
+            ? '자동 컨텍스트 리로드가 켜져 있어 클래스 변경 시 Tomcat 이 컨텍스트를 자동으로 다시 로드합니다.'
+            : '자동 컨텍스트 리로드는 꺼져 있어(reloadable=false) 메서드 본문 변경은 디버거 핫스왑으로, 구조적 변경은 "Reload Context Now" 로 반영하세요. (앱 우클릭 → "Toggle Auto Context Reload" 로 언제든 전환 가능)')
         : `"${item.app.contextPath}" 의 라이브 오버레이를 해제했습니다.`
     );
+    // context.xml just changed (docBase/reloadable/etc) - force an already-running server to
+    // actually pick that up now, rather than leaving it to Tomcat's own autoDeploy scan.
+    await ensureContextReloaded(item.server, item.app.contextPath, { quiet: true });
+  });
+
+  reg('tomcat.toggleAutoReload', async (item: AppTreeItem) => {
+    if (!item || item.app.type !== 'exploded' || !item.app.sourceOverlayPath) return;
+    const next = !item.app.reloadable;
+    await manager.setSourceOverlay(item.server.id, item.app.contextPath, item.app.sourceOverlayPath, next);
+    vscode.window.showInformationMessage(
+      next
+        ? `"${item.app.contextPath}" 의 자동 컨텍스트 리로드를 켰습니다. 클래스 변경 시 Tomcat 이 컨텍스트를 자동으로 다시 로드합니다(디버거 없이도 반영, 다소 무거움).`
+        : `"${item.app.contextPath}" 의 자동 컨텍스트 리로드를 껐습니다. 메서드 본문 변경은 디버거 핫스왑으로, 구조적 변경은 "Reload Context Now" 로 반영하세요.`
+    );
+    // Same as above - reloadable is only read when the context (re)loads, so force that now.
+    await ensureContextReloaded(item.server, item.app.contextPath, { quiet: true });
   });
 
   reg('tomcat.undeploy', async (item: AppTreeItem) => {
@@ -437,6 +606,16 @@ export function activate(context: vscode.ExtensionContext) {
     if (!item) return;
     const url = manager.getAppUrl(item.server, item.app);
     vscode.env.openExternal(vscode.Uri.parse(url));
+  });
+
+  reg('tomcat.reloadContext', async (item: AppTreeItem) => {
+    if (!item) return;
+    const status = manager.getStatus(item.server.id);
+    if (status !== 'running' && status !== 'debugging') {
+      vscode.window.showInformationMessage('서버가 실행 중이 아닙니다. 먼저 시작하세요.');
+      return;
+    }
+    await ensureContextReloaded(item.server, item.app.contextPath);
   });
 
   reg('tomcat.resetManagerCredentials', async (item: ServerTreeItem) => {
@@ -464,6 +643,21 @@ export function activate(context: vscode.ExtensionContext) {
     }
   });
 
+  reg('tomcat.forceResyncClasses', async (item: AppTreeItem) => {
+    if (!item || item.app.type !== 'exploded') return;
+    const channel = manager.getOutputChannel(item.server.id);
+    channel?.show(true);
+    channel?.appendLine(`[classes-sync] Force Resync Classes Now 실행: ${item.app.contextPath || '/'}`);
+
+    const result = await manager.forceResyncClasses(item.server.id, item.app.contextPath);
+    if (result.reason) {
+      vscode.window.showWarningMessage(`동기화를 실행할 수 없습니다: ${result.reason}`);
+      return;
+    }
+    vscode.window.showInformationMessage(
+      `"${item.app.contextPath}" 의 target/classes(또는 build/classes, build/resources) 를 WEB-INF/classes 로 동기화했습니다.`
+    );
+  });
 }
 
 export async function deactivate(): Promise<void> {

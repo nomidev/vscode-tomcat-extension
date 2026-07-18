@@ -136,3 +136,46 @@ export interface ManagerResult {
   statusCode?: number;
 }
 
+function callManager(
+  server: TomcatServerConfig,
+  creds: ManagerCredentials,
+  command: string,
+  params: Record<string, string>
+): Promise<ManagerResult> {
+  const query = new URLSearchParams(params).toString();
+  const options: http.RequestOptions = {
+    host: '127.0.0.1',
+    port: server.httpPort,
+    path: `/manager/text/${command}?${query}`,
+    method: 'GET',
+    auth: `${creds.username}:${creds.password}`,
+    timeout: 8000
+  };
+
+  return new Promise(resolve => {
+    const req = http.request(options, res => {
+      let data = '';
+      res.on('data', chunk => (data += chunk));
+      res.on('end', () => {
+        const ok = res.statusCode === 200 && /^OK/m.test(data);
+        resolve({ ok, message: data.trim() || `HTTP ${res.statusCode}`, statusCode: res.statusCode });
+      });
+    });
+    req.on('timeout', () => {
+      req.destroy();
+      resolve({ ok: false, message: '요청 시간 초과' });
+    });
+    req.on('error', err => resolve({ ok: false, message: err.message }));
+    req.end();
+  });
+}
+
+/** Reloads an already-deployed context in place - clears the classloader and re-reads
+ *  web.xml/annotations, without touching any other deployed app or the server process. */
+export function reloadContext(
+  server: TomcatServerConfig,
+  creds: ManagerCredentials,
+  contextPath: string
+): Promise<ManagerResult> {
+  return callManager(server, creds, 'reload', { path: contextPath || '/' });
+}

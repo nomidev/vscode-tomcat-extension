@@ -15,12 +15,12 @@ export class ServerTreeItem extends vscode.TreeItem {
 export class AppTreeItem extends vscode.TreeItem {
   constructor(public readonly server: TomcatServerConfig, public readonly app: DeployedApp) {
     super(app.contextPath || '/', vscode.TreeItemCollapsibleState.None);
-    const overlay = app.sourceOverlayPath ? ' · live sync' : '';
+    const overlay = app.sourceOverlayPath ? ` · live sync · reload:${app.reloadable ? 'auto' : 'manual'}` : '';
     this.description = (app.type === 'war' ? 'WAR' : 'exploded') + overlay;
     this.contextValue = `tomcatApp-${app.type}`;
     this.iconPath = new vscode.ThemeIcon(app.type === 'war' ? 'file-zip' : 'folder');
     this.tooltip = app.sourceOverlayPath
-      ? `${app.sourcePath}\nLive source sync from: ${app.sourceOverlayPath}`
+      ? `${app.sourcePath}\nLive source sync from: ${app.sourceOverlayPath}\nAuto context reload: ${app.reloadable ? 'on' : 'off (debugger hot-swap + manual Reload Context Now)'}`
       : app.sourcePath;
   }
 }
