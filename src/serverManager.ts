@@ -473,15 +473,32 @@ export class ServerManager {
     this.running.set(id, info);
     this._onDidChange.fire();
 
+    let debuggerAttached = false;
+    const attachOnce = () => {
+      if (debug && !debuggerAttached) {
+        debuggerAttached = true;
+        this.attachDebugger(server);
+      }
+    };
+
+    // Buffered across chunks: Node delivers stdout in arbitrarily-sized pieces, so a marker
+    // like "Server startup in" can end up split across two separate 'data' events (e.g.
+    // "...Server star" then "tup in 1234 ms"). Testing each chunk in isolation would then
+    // never match at all, silently skipping the debugger attach below. Keep a small rolling
+    // buffer (just the tail end, bounded so it can't grow unbounded on a very chatty log) and
+    // test against that instead.
+    let recentOutput = '';
+    const STARTUP_MARKER = /Server startup in|INFO.*Starting ProtocolHandler/;
+
     proc.stdout.on('data', (d: Buffer) => {
       const text = d.toString();
       outputChannel.append(text);
-      if (/Server startup in/.test(text) || /INFO.*Starting ProtocolHandler/.test(text)) {
+
+      recentOutput = (recentOutput + text).slice(-2000);
+      if (STARTUP_MARKER.test(recentOutput)) {
         info.status = debug ? 'debugging' : 'running';
         this._onDidChange.fire();
-        if (debug) {
-          this.attachDebugger(server);
-        }
+        attachOnce();
       }
     });
 
@@ -504,12 +521,17 @@ export class ServerManager {
       this._onDidChange.fire();
     });
 
-    // Safety net: if we never see the startup banner within 20s, assume running.
+    // Safety net: if we never see the startup banner within 20s (log wording differs between
+    // Tomcat versions, or it's just a slow boot), assume running anyway - and, critically,
+    // still attach the debugger if this is a debug start. Missing this call here was a real
+    // bug: the debugger would simply never attach if the banner regex didn't match, with no
+    // error shown, silently leaving `debuggerAttached` false forever.
     setTimeout(() => {
       if (info.status === 'starting') {
         info.status = debug ? 'debugging' : 'running';
         this._onDidChange.fire();
       }
+      attachOnce();
     }, 20000);
   }
 
@@ -522,7 +544,15 @@ export class ServerManager {
       port: server.debugPort
     };
     try {
-      await vscode.debug.startDebugging(undefined, debugConfig);
+      const started = await vscode.debug.startDebugging(undefined, debugConfig);
+      if (!started) {
+        // startDebugging can resolve to false (rather than throw) e.g. when no "java" debug
+        // type is registered at all - most commonly because the "Debugger for Java"
+        // extension isn't installed. Surface that instead of failing silently.
+        vscode.window.showWarningMessage(
+          `Java 디버거 연결에 실패했습니다. VSCode에 "Debugger for Java" 확장(보통 "Extension Pack for Java"에 포함)이 설치되어 있는지 확인해주세요.`
+        );
+      }
     } catch (err: any) {
       vscode.window.showWarningMessage(
         `Java 디버거 연결 실패 (Debugger for Java 확장이 설치되어 있는지 확인하세요): ${err?.message ?? err}`
