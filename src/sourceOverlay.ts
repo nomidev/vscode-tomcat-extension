@@ -72,49 +72,26 @@ export function findProjectRoot(startPath: string): string | undefined {
 export interface BuildInfo {
   tool: 'maven' | 'gradle';
   projectRoot: string;
-  /** Shell command to run (cwd = projectRoot) that compiles Java sources and processes resources. */
-  buildCommand: string;
-  /** Where the build command's compiled classes + processed resources land. Maven puts both
-   *  in one folder; Gradle splits them into separate folders, so this can be more than one. */
+  /** Where compiled classes + processed resources land once *something* builds this project
+   *  (VSCode's own Java language server as you save .java files, a manual `mvn compile` /
+   *  `gradle classes` in a terminal, IntelliJ, CI, etc.) - this extension never runs a build
+   *  itself, it only watches these folders and mirrors them into WEB-INF/classes live. Maven
+   *  puts everything in one folder; Gradle splits classes and resources into two. */
   classesOutDirs: string[];
-  javaSrcDir: string;
-  resourcesSrcDir: string;
-}
-
-/** Quote executable paths so configured commands under `Program Files` work in CMD. */
-function shellCommand(executable: string, args: string[]): string {
-  const quotedExecutable = /[\s"]/ .test(executable)
-    ? `"${executable.replace(/"/g, '\\"')}"`
-    : executable;
-  return [quotedExecutable, ...args].join(' ');
 }
 
 /**
- * Detects whether `projectRoot` is a Maven or Gradle project and, if so, returns the info
- * needed to auto-compile Java changes and locate the resulting output. Prefers the project's
- * own wrapper script (mvnw/gradlew) when present, falling back to a bare `mvn`/`gradle` on
- * PATH. The exact commands can be overridden via the `tomcat.mavenCommand` /
- * `tomcat.gradleCommand` settings (passed in by the caller).
+ * Detects whether `projectRoot` is a Maven or Gradle project and, if so, returns where its
+ * compiled output lands (used to live-sync into WEB-INF/classes - see JavaBuildSyncWatcher).
  */
-export function detectBuildInfo(
-  projectRoot: string,
-  mavenCommand = 'mvn',
-  gradleCommand = 'gradle'
-): BuildInfo | undefined {
-  const isWin = process.platform === 'win32';
-
+export function detectBuildInfo(projectRoot: string): BuildInfo | undefined {
   if (fs.existsSync(path.join(projectRoot, 'pom.xml'))) {
-    const wrapper = path.join(projectRoot, isWin ? 'mvnw.cmd' : 'mvnw');
-    const cmd = mavenCommand === 'mvn' && fs.existsSync(wrapper) ? (isWin ? '.\\mvnw.cmd' : './mvnw') : mavenCommand;
     return {
       tool: 'maven',
       projectRoot,
-      buildCommand: shellCommand(cmd, ['compile']),
-      // Maven's `compile` phase runs `process-resources` first, so target/classes ends up
-      // with both compiled .class files and copied resources in one place.
-      classesOutDirs: [path.join(projectRoot, 'target', 'classes')],
-      javaSrcDir: path.join(projectRoot, 'src', 'main', 'java'),
-      resourcesSrcDir: path.join(projectRoot, 'src', 'main', 'resources')
+      // Maven's `process-resources` + `compile` phases both write into target/classes, so
+      // compiled .class files and copied resources end up together in one place.
+      classesOutDirs: [path.join(projectRoot, 'target', 'classes')]
     };
   }
 
@@ -122,21 +99,14 @@ export function detectBuildInfo(
     fs.existsSync(path.join(projectRoot, 'build.gradle')) ||
     fs.existsSync(path.join(projectRoot, 'build.gradle.kts'))
   ) {
-    const wrapper = path.join(projectRoot, isWin ? 'gradlew.bat' : 'gradlew');
-    const cmd =
-      gradleCommand === 'gradle' && fs.existsSync(wrapper) ? (isWin ? '.\\gradlew.bat' : './gradlew') : gradleCommand;
     return {
       tool: 'gradle',
       projectRoot,
-      // `classes` compiles Java AND processes resources for the main source set.
-      buildCommand: shellCommand(cmd, ['classes']),
       // Gradle keeps compiled classes and processed resources in separate output folders.
       classesOutDirs: [
         path.join(projectRoot, 'build', 'classes', 'java', 'main'),
         path.join(projectRoot, 'build', 'resources', 'main')
-      ],
-      javaSrcDir: path.join(projectRoot, 'src', 'main', 'java'),
-      resourcesSrcDir: path.join(projectRoot, 'src', 'main', 'resources')
+      ]
     };
   }
 

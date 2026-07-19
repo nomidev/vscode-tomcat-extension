@@ -6,10 +6,26 @@ export interface DeployedApp {
   /** absolute path to the .war file or the exploded webapp folder */
   sourcePath: string;
   type: 'war' | 'exploded';
-  /** For exploded (typically Maven) deployments: an additional source folder (e.g. src/main/webapp)
-   *  layered on top of docBase via Tomcat <Resources><PreResources>, so JSP/static file edits are
-   *  picked up instantly without rebuilding or restarting. */
+  /** For exploded (typically Maven/Gradle) deployments: an additional source folder (e.g.
+   *  src/main/webapp) linked directly into docBase, so JSP/static file edits are picked up
+   *  instantly without rebuilding or restarting. */
   sourceOverlayPath?: string;
+  /** Extra <Context> attributes detected from the deployed app's own META-INF/context.xml
+   *  (e.g. an explicit `path`, `override`, etc.), preserved so regenerating context.xml later
+   *  (e.g. when toggling live reload) doesn't silently drop them. */
+  contextExtraAttributes?: Record<string, string>;
+  /** Raw child elements from the deployed app's own META-INF/context.xml - most importantly
+   *  <Resource>/<Environment> JNDI definitions (e.g. a DataSource) - preserved the same way. */
+  contextInnerXml?: string;
+  /** Whether Tomcat should auto-reload this context's classloader when it notices a class/jar
+   *  change under WEB-INF (Tomcat's own `reloadable` Context attribute). Defaults to true
+   *  (Tomcat's own default) when unset. See serverManager.ts for the live-reload tradeoff:
+   *  true reflects every class change automatically but tears down and rebuilds the whole
+   *  context (Spring beans, sessions, etc.) every time; false relies on an attached Java
+   *  debugger's hot-swap for simple changes and needs a manual "Reload Context Now" for
+   *  anything hot-swap can't handle (new fields/methods/classes).
+   */
+  reloadable?: boolean;
 }
 
 export interface TomcatServerConfig {

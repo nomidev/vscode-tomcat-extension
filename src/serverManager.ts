@@ -29,6 +29,17 @@ function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/** Escapes text for safe use inside a double-quoted XML attribute value (e.g. a docBase path
+ *  that happens to contain `&`, `<`, or `"`), so generated context.xml files stay valid XML
+ *  regardless of what characters show up in a file path. */
+function escapeXmlAttr(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 export class ServerManager {
   private servers: TomcatServerConfig[] = [];
   private running = new Map<string, RunningInfo>();
@@ -79,22 +90,14 @@ export class ServerManager {
   /** Whether Java/resource changes should be auto-compiled and synced into WEB-INF/classes
    *  whenever the live source overlay is enabled for a Maven/Gradle app. */
   isJavaAutoBuildEnabled(): boolean {
-    return vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>('javaAutoBuild', false);
-  }
-
-  private getMavenCommand(): string {
-    return vscode.workspace.getConfiguration(CONFIG_SECTION).get<string>('mavenCommand', 'mvn');
-  }
-
-  private getGradleCommand(): string {
-    return vscode.workspace.getConfiguration(CONFIG_SECTION).get<string>('gradleCommand', 'gradle');
+    return vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>('javaAutoBuild', true);
   }
 
   /** Whether Tomcat's own bundled sample/admin webapps (ROOT, docs, examples, host-manager)
    *  should be excluded from auto-deployment on startup, so only your own app(s) - and the
    *  Manager app, needed for "Reload Context Now" - actually run. */
   isExcludeDefaultWebappsEnabled(): boolean {
-    return vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>('excludeDefaultWebapps', false);
+    return vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>('excludeDefaultWebapps', true);
   }
 
   getServers(): TomcatServerConfig[] {
@@ -221,50 +224,72 @@ export class ServerManager {
   }
 
   /**
-   * If Java auto-build is enabled and `overlayPath`/`docBase` sit inside a detectable
-   * Maven/Gradle project, starts (or restarts) a watcher that recompiles Java changes and
-   * syncs the result into `docBase/WEB-INF/classes`. Silently does nothing if auto-build is
-   * disabled or no project could be detected (e.g. a hand-picked, non-standard overlay path).
-   * When `runInitialBuild` is true, waits for one fresh compile to finish before returning
-   * (used right before Tomcat starts, so it boots against up-to-date output).
+   * Manually triggers an immediate Java/resource compile + sync for a deployed exploded app,
+   * for diagnosing/forcing the auto-build-on-change feature on demand. Returns a reason
+   * string (no watcher, no Maven/Gradle project detected, auto-build disabled, etc.) when it
+   * can't run at all, distinct from a build that ran but failed (whose output goes to the
+   * server's output channel as usual).
+   */
+  async forceResyncClasses(serverId: string, contextPath: string): Promise<{ ok: boolean; reason?: string }> {
+    const server = this.getServer(serverId);
+    if (!server) return { ok: false, reason: '서버를 찾을 수 없습니다.' };
+    const app = server.deployedApps.find(a => a.contextPath === contextPath);
+    if (!app || app.type !== 'exploded') return { ok: false, reason: 'exploded 배포가 아닙니다.' };
+    if (!app.sourceOverlayPath) return { ok: false, reason: '라이브 소스 리로드가 활성화되어 있지 않습니다.' };
+    if (!this.isJavaAutoBuildEnabled()) return { ok: false, reason: '"tomcat.javaAutoBuild" 설정이 꺼져 있습니다.' };
+
+    const projectRoot = findProjectRoot(app.sourceOverlayPath) ?? findProjectRoot(app.sourcePath);
+    if (!projectRoot) return { ok: false, reason: 'Maven/Gradle 프로젝트 루트(pom.xml/build.gradle)를 찾지 못했습니다.' };
+
+    const buildInfo = detectBuildInfo(projectRoot);
+    if (!buildInfo) return { ok: false, reason: 'Maven/Gradle 프로젝트 정보를 감지하지 못했습니다.' };
+
+    let watcher = this.buildWatchers.get(this.syncKey(serverId, contextPath));
+    if (!watcher) {
+      const outputChannel = this.running.get(serverId)?.outputChannel;
+      const classesTargetDir = path.join(app.sourcePath, 'WEB-INF', 'classes');
+      watcher = new JavaBuildSyncWatcher(buildInfo, classesTargetDir, msg => outputChannel?.appendLine(msg));
+      watcher.start();
+      this.buildWatchers.set(this.syncKey(serverId, contextPath), watcher);
+    }
+
+    const success = await watcher.buildOnce();
+    return { ok: success };
+  }
+
+  /**
+   * If class-sync is enabled and `overlayPath`/`docBase` sit inside a detectable Maven/Gradle
+   * project, starts (or restarts) a watcher that mirrors that project's compiled-output
+   * folder(s) into `docBase/WEB-INF/classes` live (see JavaBuildSyncWatcher - no build is
+   * ever run by this extension). Silently does nothing if disabled or no project could be
+   * detected (e.g. a hand-picked, non-standard overlay path). When `runInitialSync` is true,
+   * waits for one immediate resync before returning (used right before Tomcat starts, so it
+   * boots against whatever's currently built).
    */
   private async maybeStartJavaBuildSync(
     serverId: string,
     contextPath: string,
     docBase: string,
     overlayPath: string,
-    runInitialBuild = false,
-    outputChannelOverride?: vscode.OutputChannel,
-    debug = false
+    runInitialSync = false,
+    outputChannelOverride?: vscode.OutputChannel
   ): Promise<void> {
     this.stopJavaBuildSync(serverId, contextPath);
     if (!this.isJavaAutoBuildEnabled()) return;
 
-    const outputChannel = outputChannelOverride ?? this.running.get(serverId)?.outputChannel;
-    if (debug) {
-      outputChannel?.appendLine('[HotSwap] Debug mode: Maven/Gradle auto-build is disabled.');
-      outputChannel?.appendLine('[HotSwap] Save Java files through the VS Code Java debugger to hot-swap method-body changes.');
-      outputChannel?.appendLine('[HotSwap] Adding/removing fields, methods, or classes still requires a rebuild and Tomcat restart.');
-      return;
-    }
-
     const projectRoot = findProjectRoot(overlayPath) ?? findProjectRoot(docBase);
     if (!projectRoot) return;
 
-    const buildInfo = detectBuildInfo(projectRoot, this.getMavenCommand(), this.getGradleCommand());
+    const buildInfo = detectBuildInfo(projectRoot);
     if (!buildInfo) return;
 
+    const outputChannel = outputChannelOverride ?? this.running.get(serverId)?.outputChannel;
     const classesTargetDir = path.join(docBase, 'WEB-INF', 'classes');
-    const watcher = new JavaBuildSyncWatcher(
-      buildInfo,
-      classesTargetDir,
-      msg => outputChannel?.appendLine(msg),
-      this.getServer(serverId)?.javaHome
-    );
+    const watcher = new JavaBuildSyncWatcher(buildInfo, classesTargetDir, msg => outputChannel?.appendLine(msg));
     watcher.start();
     this.buildWatchers.set(this.syncKey(serverId, contextPath), watcher);
 
-    if (runInitialBuild) {
+    if (runInitialSync) {
       await watcher.buildOnce();
     }
   }
@@ -388,32 +413,30 @@ export class ServerManager {
     }
 
     // Start (or refresh) live source-link watchers for any exploded app with an overlay
-    // configured. We do not run a fresh Maven/Gradle compile before startup, because some
-    // projects fail at that step and the server should still be able to start.
-    const effectiveDebug = debug;
-
+    // configured, and sync whatever's currently in the Maven/Gradle output folder(s) into
+    // WEB-INF/classes right now, so Tomcat boots against up-to-date classes/resources. No
+    // build is run here - only whatever's already been compiled (by VSCode's Java language
+    // server, a manual mvn/gradle build, etc.) gets copied over.
+    const presyncTasks: Promise<void>[] = [];
     for (const app of server.deployedApps) {
       if (app.type === 'exploded' && app.sourceOverlayPath) {
         this.startSourceSync(id, app.contextPath, app.sourceOverlayPath, app.sourcePath);
-        if (effectiveDebug) {
-          this.stopJavaBuildSync(id, app.contextPath);
-        } else {
-          await this.maybeStartJavaBuildSync(
-            id,
-            app.contextPath,
-            app.sourcePath,
-            app.sourceOverlayPath,
-            false,
-            outputChannel,
-            false
-          );
-        }
+        presyncTasks.push(
+          this.maybeStartJavaBuildSync(id, app.contextPath, app.sourcePath, app.sourceOverlayPath, true, outputChannel)
+        );
       }
     }
-    if (debug) {
-      outputChannel.appendLine('[HotSwap] Debug mode: Maven/Gradle auto-build은 비활성화됩니다.');
-      outputChannel.appendLine('[HotSwap] Java 파일 저장 시 VS Code Java 디버거가 변경사항을 핫스왑하도록 연결됩니다.');
-      outputChannel.appendLine('[HotSwap] 필드/메서드/클래스 추가/제거는 여전히 재시작이 필요할 수 있습니다.');
+    if (presyncTasks.length > 0) {
+      outputChannel.appendLine('[Tomcat] Syncing compiled classes/resources for Maven/Gradle app(s)...');
+      try {
+        await Promise.all(presyncTasks);
+      } catch (err) {
+        // Defense in depth: a sync/link failure for one app must never prevent Tomcat itself
+        // from starting - log it and keep going. (maybeStartJavaBuildSync/JavaBuildSyncWatcher
+        // already catch their own copy errors, but this is a last-resort safety net in case
+        // something unanticipated throws here.)
+        outputChannel.appendLine(`[Tomcat] Warning: pre-start sync had an error, continuing anyway: ${err}`);
+      }
     }
 
     const env: NodeJS.ProcessEnv = {
@@ -436,15 +459,13 @@ export class ServerManager {
     this.applyLogLevel(server.homePath, effectiveLogLevel);
 
     const args = ['run'];
-    if (effectiveDebug) {
+    if (debug) {
       env.JPDA_ADDRESS = String(server.debugPort);
       env.JPDA_TRANSPORT = 'dt_socket';
       args.unshift('jpda');
     }
 
-    outputChannel.appendLine(
-      `[Tomcat] Starting ${server.name} (${effectiveDebug ? 'debug' : 'run'}) using ${script} ${args.join(' ')}`
-    );
+    outputChannel.appendLine(`[Tomcat] Starting ${server.name} (${debug ? 'debug' : 'run'}) using ${script} ${args.join(' ')}`);
     outputChannel.appendLine(`[Tomcat] JAVA_HOME = ${env.JAVA_HOME ?? '(system default)'}`);
     outputChannel.appendLine(`[Tomcat] Log level = ${effectiveLogLevel}`);
     outputChannel.appendLine(`[Tomcat] CATALINA_OPTS = ${env.CATALINA_OPTS ?? '(none)'}`);
@@ -453,22 +474,53 @@ export class ServerManager {
       env,
       cwd: server.homePath,
       detached: process.platform !== 'win32',
-      shell: true
+      shell: process.platform === 'win32'
     });
 
     const info: RunningInfo = { proc, status: 'starting', outputChannel };
     this.running.set(id, info);
     this._onDidChange.fire();
 
+    let debuggerAttached = false;
+    const attachOnce = () => {
+      if (debug && !debuggerAttached) {
+        debuggerAttached = true;
+        this.attachDebugger(server);
+      }
+    };
+
+    let startupNotified = false;
+    const notifyStartedOnce = (viaFallback: boolean) => {
+      if (startupNotified) return;
+      startupNotified = true;
+      const suffix = viaFallback ? ' (시작 배너를 감지하지 못해 20초 후 자동으로 표시됨)' : '';
+      vscode.window.showInformationMessage(
+        `✅ ${server.name} 서버가 ${debug ? '디버그 모드로 ' : ''}시작되었습니다 — http://localhost:${server.httpPort}${suffix}`
+      );
+    };
+
+    // Buffered across chunks: Node delivers stdout in arbitrarily-sized pieces, so a marker
+    // like "Server startup in" can end up split across two separate 'data' events (e.g.
+    // "...Server star" then "tup in 1234 ms"). Testing each chunk in isolation would then
+    // never match at all, silently skipping the debugger attach below. Keep a small rolling
+    // buffer (just the tail end, bounded so it can't grow unbounded on a very chatty log) and
+    // test against that instead.
+    let recentOutput = '';
+    const STARTUP_MARKER = /Server startup in|INFO.*Starting ProtocolHandler/;
+    const STARTUP_COMPLETE_MARKER = /Server startup in/;
+
     proc.stdout.on('data', (d: Buffer) => {
       const text = d.toString();
       outputChannel.append(text);
-      if (/Server startup in/.test(text) || /INFO.*Starting ProtocolHandler/.test(text)) {
-        info.status = effectiveDebug ? 'debugging' : 'running';
+
+      recentOutput = (recentOutput + text).slice(-2000);
+      if (STARTUP_MARKER.test(recentOutput)) {
+        info.status = debug ? 'debugging' : 'running';
         this._onDidChange.fire();
-        if (effectiveDebug) {
-          this.attachDebugger(server);
-        }
+        attachOnce();
+      }
+      if (STARTUP_COMPLETE_MARKER.test(recentOutput)) {
+        notifyStartedOnce(false);
       }
     });
 
@@ -491,12 +543,18 @@ export class ServerManager {
       this._onDidChange.fire();
     });
 
-    // Safety net: if we never see the startup banner within 20s, assume running.
+    // Safety net: if we never see the startup banner within 20s (log wording differs between
+    // Tomcat versions, or it's just a slow boot), assume running anyway - and, critically,
+    // still attach the debugger if this is a debug start. Missing this call here was a real
+    // bug: the debugger would simply never attach if the banner regex didn't match, with no
+    // error shown, silently leaving `debuggerAttached` false forever.
     setTimeout(() => {
       if (info.status === 'starting') {
-        info.status = effectiveDebug ? 'debugging' : 'running';
+        info.status = debug ? 'debugging' : 'running';
         this._onDidChange.fire();
       }
+      attachOnce();
+      notifyStartedOnce(true);
     }, 20000);
   }
 
@@ -509,7 +567,15 @@ export class ServerManager {
       port: server.debugPort
     };
     try {
-      await vscode.debug.startDebugging(undefined, debugConfig);
+      const started = await vscode.debug.startDebugging(undefined, debugConfig);
+      if (!started) {
+        // startDebugging can resolve to false (rather than throw) e.g. when no "java" debug
+        // type is registered at all - most commonly because the "Debugger for Java"
+        // extension isn't installed. Surface that instead of failing silently.
+        vscode.window.showWarningMessage(
+          `Java 디버거 연결에 실패했습니다. VSCode에 "Debugger for Java" 확장(보통 "Extension Pack for Java"에 포함)이 설치되어 있는지 확인해주세요.`
+        );
+      }
     } catch (err: any) {
       vscode.window.showWarningMessage(
         `Java 디버거 연결 실패 (Debugger for Java 확장이 설치되어 있는지 확인하세요): ${err?.message ?? err}`
@@ -633,7 +699,8 @@ export class ServerManager {
     contextPath?: string,
     extraAttributes?: Record<string, string>,
     innerXml?: string,
-    sourceOverlayPath?: string
+    sourceOverlayPath?: string,
+    reloadable?: boolean
   ): Promise<void> {
     const server = this.getServer(id);
     if (!server) return;
@@ -645,27 +712,31 @@ export class ServerManager {
     const xmlName = appName === '' || appName.toUpperCase() === 'ROOT' ? 'ROOT.xml' : `${appName}.xml`;
     const contextXmlPath = path.join(confDir, xmlName);
     const resolvedPath = `/${appName === 'ROOT' ? '' : appName}`;
-    const xml = this.buildContextXml(folderPath.replace(/\\/g, '/'), resolvedPath, extraAttributes, innerXml);
+    // Live reload defaults reloadable to false (see setSourceOverlay for the full rationale);
+    // an explicit choice always wins over that default.
+    const effectiveReloadable = reloadable ?? (sourceOverlayPath ? false : true);
+    const xml = this.buildContextXml(
+      folderPath.replace(/\\/g, '/'),
+      resolvedPath,
+      extraAttributes,
+      innerXml,
+      effectiveReloadable ? 'true' : 'false'
+    );
     fs.writeFileSync(contextXmlPath, xml, 'utf8');
 
     await this.registerDeployedApp(server, {
       contextPath: resolvedPath,
       sourcePath: folderPath,
       type: 'exploded',
-      sourceOverlayPath
+      sourceOverlayPath,
+      contextExtraAttributes: extraAttributes,
+      contextInnerXml: innerXml,
+      reloadable: effectiveReloadable
     });
 
     if (sourceOverlayPath) {
       this.startSourceSync(id, resolvedPath, sourceOverlayPath, folderPath);
-      await this.maybeStartJavaBuildSync(
-        id,
-        resolvedPath,
-        folderPath,
-        sourceOverlayPath,
-        false,
-        undefined,
-        false
-      );
+      await this.maybeStartJavaBuildSync(id, resolvedPath, folderPath, sourceOverlayPath, true);
     }
   }
 
@@ -674,39 +745,56 @@ export class ServerManager {
    * already-deployed exploded app. docBase/path stay exactly as originally deployed; this
    * starts/stops a background watcher that mirrors file changes from `overlayPath` into the
    * app's docBase, plus (if enabled and a Maven/Gradle project is detected) a watcher that
-   * auto-compiles Java/resource changes into WEB-INF/classes. Also regenerates the app's
-   * context.xml as a plain (no <Resources>) file, which cleans up any leftover
-   * <Resources><PreResources> block from older versions of this extension that used Tomcat's
-   * Resources-overlay mechanism (that approach hit a NullPointerException on some Tomcat
-   * 8.0.x builds - see DirResourceSet - so it was replaced with this file-sync approach,
-   * which works identically on any Tomcat version).
+   * mirrors compiled classes/resources into WEB-INF/classes. Regenerates the app's
+   * context.xml (no <Resources> block - see the class-level notes on why the old
+   * <Resources><PreResources> overlay approach was replaced), reusing any
+   * `<Resource>`/`<Environment>`/etc. originally detected from the app's own
+   * META-INF/context.xml (`app.contextExtraAttributes`/`contextInnerXml`) so toggling live
+   * reload never silently drops a JNDI DataSource or similar.
+   *
+   * `reloadable` lets the caller explicitly choose Tomcat's auto-reload-on-class-change
+   * behavior for this app; if omitted, keeps whatever was previously set (or - for a first
+   * time enable with no prior value - defaults to false while the overlay is on). See the
+   * tradeoff explained on the DeployedApp.reloadable field: true reflects every class change
+   * automatically but tears down and rebuilds the whole context every time; false relies on
+   * an attached Java debugger's hot-swap for simple changes (silent, instant, no state loss)
+   * and needs a manual "Reload Context Now" for anything hot-swap can't handle - which is
+   * only actually useful if you're routinely running with a debugger attached. If you mostly
+   * run without one, `reloadable: true` is usually the better choice despite the heavier
+   * per-change reload, since otherwise nothing reflects automatically at all.
    */
-  async setSourceOverlay(id: string, contextPath: string, overlayPath: string | undefined): Promise<void> {
+  async setSourceOverlay(
+    id: string,
+    contextPath: string,
+    overlayPath: string | undefined,
+    reloadable?: boolean
+  ): Promise<void> {
     const server = this.getServer(id);
     if (!server) return;
     const app = server.deployedApps.find(a => a.contextPath === contextPath);
     if (!app || app.type !== 'exploded') return;
 
+    const effectiveReloadable = reloadable ?? app.reloadable ?? (overlayPath ? false : true);
+
     const appName = contextPath === '/' ? 'ROOT' : contextPath.replace(/^\/+/, '');
     const xmlName = appName === 'ROOT' ? 'ROOT.xml' : `${appName}.xml`;
     const contextXmlPath = path.join(server.homePath, 'conf', 'Catalina', 'localhost', xmlName);
-    const xml = this.buildContextXml(app.sourcePath.replace(/\\/g, '/'), contextPath);
+    const xml = this.buildContextXml(
+      app.sourcePath.replace(/\\/g, '/'),
+      contextPath,
+      app.contextExtraAttributes,
+      app.contextInnerXml,
+      effectiveReloadable ? 'true' : 'false'
+    );
     fs.writeFileSync(contextXmlPath, xml, 'utf8');
 
     app.sourceOverlayPath = overlayPath;
+    app.reloadable = effectiveReloadable;
     await this.save();
 
     if (overlayPath) {
       this.startSourceSync(id, contextPath, overlayPath, app.sourcePath);
-      await this.maybeStartJavaBuildSync(
-        id,
-        contextPath,
-        app.sourcePath,
-        overlayPath,
-        false,
-        undefined,
-        false
-      );
+      await this.maybeStartJavaBuildSync(id, contextPath, app.sourcePath, overlayPath, true);
     } else {
       this.stopSourceSync(id, contextPath);
       this.stopJavaBuildSync(id, contextPath);
@@ -717,21 +805,25 @@ export class ServerManager {
     docBase: string,
     contextPath: string,
     extraAttributes?: Record<string, string>,
-    innerXml?: string
+    innerXml?: string,
+    defaultReloadable: 'true' | 'false' = 'true'
   ): string {
-    // path/docBase always come from us; caller-supplied attributes (from a detected
-    // META-INF/context.xml) can override defaults like `reloadable`.
+    // Deliberately NOT writing a `path` attribute: for context.xml files placed under
+    // conf/Catalina/<host>/ (which is how every app this extension deploys is registered),
+    // Tomcat has derived the context path from the *filename* since Tomcat 7 - any `path`
+    // attribute inside the file itself is ignored, and modern Tomcat (9+) logs a WARNING
+    // about it on every deploy. `contextPath` is still used by callers to name the XML file
+    // correctly (e.g. "lgcom.xml" for "/lgcom") - it just doesn't belong inside the file.
     const attrs: Record<string, string> = {
-      path: contextPath,
       docBase,
-      reloadable: 'true',
+      reloadable: defaultReloadable,
       ...(extraAttributes ?? {})
     };
     delete attrs['docBase'];
     delete attrs['path'];
 
-    const attrStr = [`path="${contextPath}"`, `docBase="${docBase}"`]
-      .concat(Object.entries(attrs).map(([k, v]) => `${k}="${v}"`))
+    const attrStr = [`docBase="${escapeXmlAttr(docBase)}"`]
+      .concat(Object.entries(attrs).map(([k, v]) => `${k}="${escapeXmlAttr(v)}"`))
       .join(' ');
 
     const body = (innerXml ?? '').trim();
