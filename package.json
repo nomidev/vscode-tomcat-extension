@@ -2,7 +2,7 @@
   "name": "vscode-tomcat",
   "displayName": "Tomcat for VSCode",
   "description": "IntelliJ IDEA style Apache Tomcat integration for VSCode: register servers, deploy WAR/exploded apps, start/stop/debug, view console logs.",
-  "version": "0.7.1",
+  "version": "0.8.0",
   "publisher": "local-dev",
   "engines": {
     "vscode": "^1.85.0"
