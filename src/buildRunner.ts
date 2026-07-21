@@ -47,6 +47,15 @@ function logKnownFailureHint(output: string, log: Logger): void {
     return;
   }
   if (
+    /'chcp' is not recognized|'chcp'[^\n]*내부 또는 외부 명령|chcp[^\n]*not recognized/.test(output)
+  ) {
+    log(
+      '[build] 힌트: Windows PATH에 System32가 빠져 chcp/cmd 내장 명령을 찾지 못한 것 같습니다. ' +
+        '확장을 최신으로 다시 빌드·리로드했는지 확인하고, 그래도 반복되면 %USERPROFILE%\\mavenrc_pre.cmd 에 chcp 호출이 있는지 확인해보세요.'
+    );
+    return;
+  }
+  if (
     /'mvn' is not recognized|mvn: command not found|'gradle' is not recognized|gradle: command not found|내부 또는 외부 명령/.test(
       output
     )
@@ -56,6 +65,42 @@ function logKnownFailureHint(output: string, log: Logger): void {
         'tomcat.mavenCommand / tomcat.gradleCommand 설정에 전체 경로를 지정해보세요.'
     );
   }
+}
+
+function getEffectivePath(env: NodeJS.ProcessEnv): string {
+  return (env.PATH || env.Path || '').trim();
+}
+
+function setEffectivePath(env: NodeJS.ProcessEnv, value: string): void {
+  env.PATH = value;
+  if (process.platform === 'win32') {
+    env.Path = value;
+  }
+}
+
+/** Ensures SystemRoot\\System32 (and SysWOW64) stay on PATH. The VS Code/Cursor extension host
+ *  often passes a stripped PATH without System32, which breaks `chcp` and other cmd builtins. */
+export function ensureWindowsSystemFoldersInPath(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  if (process.platform !== 'win32') {
+    return env;
+  }
+
+  const systemRoot = env.SystemRoot ?? env.WINDIR ?? process.env.SystemRoot ?? process.env.WINDIR ?? 'C:\\Windows';
+  const requiredDirs = ['System32', 'SysWOW64'].map(dir => path.join(systemRoot, dir));
+  const parts = getEffectivePath(env)
+    .split(path.delimiter)
+    .filter(Boolean);
+  const lowerParts = new Set(parts.map(p => p.toLowerCase()));
+
+  for (const dir of requiredDirs) {
+    if (!lowerParts.has(dir.toLowerCase())) {
+      parts.unshift(dir);
+      lowerParts.add(dir.toLowerCase());
+    }
+  }
+
+  setEffectivePath(env, parts.join(path.delimiter));
+  return env;
 }
 
 /** Returns the shell command to execute. Avoids prepending `chcp 65001` on Windows because
@@ -68,18 +113,32 @@ export function buildCommandForExecution(
   return command;
 }
 
-/** Clones `baseEnv` and prepends the given JDK's `bin` to PATH (and Path on Windows). */
+/** Clones `baseEnv`, prepends the given JDK's `bin` to PATH (and Path on Windows), and keeps
+ *  Windows system folders reachable for Maven/Gradle batch scripts. */
 export function buildExecutionEnvironment(baseEnv: NodeJS.ProcessEnv, javaHome: string): NodeJS.ProcessEnv {
   const env = { ...baseEnv };
   env.JAVA_HOME = javaHome;
   const javaBin = path.join(javaHome, 'bin');
-  const existingPath = env.PATH ?? env.Path ?? '';
-  const newPath = `${javaBin}${path.delimiter}${existingPath}`;
-  env.PATH = newPath;
-  if (process.platform === 'win32') {
-    env.Path = newPath;
+  const existingPath = getEffectivePath(env);
+  const newPath = existingPath ? `${javaBin}${path.delimiter}${existingPath}` : javaBin;
+  setEffectivePath(env, newPath);
+  return ensureWindowsSystemFoldersInPath(env);
+}
+
+export function prepareBuildEnvironment(baseEnv: NodeJS.ProcessEnv, javaHome?: string): NodeJS.ProcessEnv {
+  if (javaHome) {
+    return buildExecutionEnvironment(baseEnv, javaHome);
   }
-  return env;
+  return ensureWindowsSystemFoldersInPath({ ...baseEnv });
+}
+
+function spawnBuildProcess(command: string, cwd: string, env: NodeJS.ProcessEnv) {
+  if (process.platform === 'win32') {
+    const systemRoot = env.SystemRoot ?? env.WINDIR ?? process.env.SystemRoot ?? 'C:\\Windows';
+    const comSpec = process.env.ComSpec ?? path.join(systemRoot, 'System32', 'cmd.exe');
+    return spawn(comSpec, ['/d', '/s', '/c', command], { cwd, env, windowsHide: true });
+  }
+  return spawn(command, { cwd, env, shell: true });
 }
 
 /**
@@ -102,9 +161,8 @@ export function runBuildOnce(
   const log = options.log ?? (() => {});
   const command = resolveCommand(buildInfo, options.mavenCommand ?? 'mvn', options.gradleCommand ?? 'gradle');
 
-  let env: NodeJS.ProcessEnv = { ...process.env };
+  let env = prepareBuildEnvironment(process.env, options.javaHome);
   if (options.javaHome) {
-    env = buildExecutionEnvironment(env, options.javaHome);
     log(`[build] using JAVA_HOME = ${options.javaHome} (same as this server's Set Java Home)`);
   }
 
@@ -114,7 +172,7 @@ export function runBuildOnce(
   return new Promise(resolve => {
     let child;
     try {
-      child = spawn(commandToRun, { cwd: buildInfo.projectRoot, shell: true, env });
+      child = spawnBuildProcess(commandToRun, buildInfo.projectRoot, env);
     } catch (err: any) {
       const message = err?.message ?? String(err);
       log(`[build] failed to start: ${message}`);
