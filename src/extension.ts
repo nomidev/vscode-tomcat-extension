@@ -721,6 +721,41 @@ export function activate(context: vscode.ExtensionContext) {
       `"${item.app.contextPath}" 의 target/classes(또는 build/classes, build/resources) 를 WEB-INF/classes 로 동기화했습니다.`
     );
   });
+
+  reg('tomcat.buildNow', async (item: AppTreeItem) => {
+    if (!item || item.app.type !== 'exploded') return;
+    const channel = manager.getOutputChannel(item.server.id);
+    channel?.show(true);
+    channel?.appendLine(`[build] Build Now 실행: ${item.app.contextPath || '/'}`);
+
+    const result = await manager.buildNow(item.server.id, item.app.contextPath);
+    if (!result.ok) {
+      vscode.window.showErrorMessage(
+        `빌드에 실패했습니다${result.reason ? `: ${result.reason}` : ''}. 출력 채널("Tomcat: ${item.server.name}")에서 자세한 로그를 확인하세요.`
+      );
+      return;
+    }
+
+    vscode.window.showInformationMessage(
+      `"${item.app.contextPath}" 빌드 및 WEB-INF/classes 동기화가 완료되었습니다.`
+    );
+
+    // Classes just changed on disk. If this app's context isn't set to auto-reload, nothing
+    // will pick that up on its own - offer the one-click way to actually apply it now.
+    if (!item.app.reloadable) {
+      const status = manager.getStatus(item.server.id);
+      if (status === 'running' || status === 'debugging') {
+        const choice = await vscode.window.showInformationMessage(
+          '자동 컨텍스트 리로드가 꺼져 있어(reloadable=false), 방금 빌드한 클래스는 디버거 핫스왑이나 수동 리로드가 있어야 반영됩니다. 지금 리로드할까요?',
+          '지금 리로드',
+          '나중에'
+        );
+        if (choice === '지금 리로드') {
+          await ensureContextReloaded(item.server, item.app.contextPath);
+        }
+      }
+    }
+  });
 }
 
 export async function deactivate(): Promise<void> {

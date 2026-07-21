@@ -2,7 +2,7 @@
   "name": "vscode-tomcat",
   "displayName": "Tomcat for VSCode",
   "description": "IntelliJ IDEA style Apache Tomcat integration for VSCode: register servers, deploy WAR/exploded apps, start/stop/debug, view console logs.",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "publisher": "local-dev",
   "engines": {
     "vscode": "^1.85.0"
@@ -154,6 +154,7 @@
       { "command": "tomcat.reloadContext", "title": "Tomcat: Reload Context Now (No Restart)", "icon": "$(zap)" },
       { "command": "tomcat.resetManagerCredentials", "title": "Tomcat: Reset Manager Credentials...", "icon": "$(key)" },
       { "command": "tomcat.forceResyncClasses", "title": "Tomcat: Force Resync Classes Now", "icon": "$(sync)" },
+      { "command": "tomcat.buildNow", "title": "Tomcat: Build Now (mvn/gradle)", "icon": "$(tools)" },
       { "command": "tomcat.toggleAutoReload", "title": "Tomcat: Toggle Auto Context Reload", "icon": "$(refresh)" }
     ],
     "menus": {
@@ -190,6 +191,7 @@
         { "command": "tomcat.reloadContext", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatApp-/", "group": "inline@3" },
         { "command": "tomcat.reloadContext", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatApp-/", "group": "1_app@4" },
         { "command": "tomcat.forceResyncClasses", "when": "view =~ /^tomcatServers/ && viewItem == tomcatApp-exploded", "group": "1_app@5" },
+        { "command": "tomcat.buildNow", "when": "view =~ /^tomcatServers/ && viewItem == tomcatApp-exploded", "group": "1_app@6" },
         { "command": "tomcat.toggleAutoReload", "when": "view =~ /^tomcatServers/ && viewItem == tomcatApp-exploded", "group": "1_app@6" }
       ]
     }

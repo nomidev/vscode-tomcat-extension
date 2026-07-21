@@ -239,6 +239,43 @@ export class ServerManager {
   }
 
   /**
+   * Manually runs the project's actual compile command once (unlike forceResyncClasses,
+   * which only re-copies whatever's already built) for a deployed exploded app with live
+   * reload on, then syncs the result into WEB-INF/classes. Reuses the exact same Maven/Gradle
+   * detection and build-running logic as tomcat.buildBeforeStart (buildRunner.ts /
+   * detectBuildInfo), so it works transparently for either build tool - no reason to special
+   * case Maven only when Gradle projects get the same detection for free.
+   */
+  async buildNow(serverId: string, contextPath: string): Promise<{ ok: boolean; reason?: string }> {
+    const server = this.getServer(serverId);
+    if (!server) return { ok: false, reason: '서버를 찾을 수 없습니다.' };
+    const app = server.deployedApps.find(a => a.contextPath === contextPath);
+    if (!app || app.type !== 'exploded') return { ok: false, reason: 'exploded 배포가 아닙니다.' };
+    if (!app.sourceOverlayPath) return { ok: false, reason: '라이브 소스 리로드가 활성화되어 있지 않습니다.' };
+
+    const projectRoot = findProjectRoot(app.sourceOverlayPath) ?? findProjectRoot(app.sourcePath);
+    if (!projectRoot) return { ok: false, reason: 'Maven/Gradle 프로젝트 루트(pom.xml/build.gradle)를 찾지 못했습니다.' };
+
+    const buildInfo = detectBuildInfo(projectRoot);
+    if (!buildInfo) return { ok: false, reason: 'Maven/Gradle 프로젝트 정보를 감지하지 못했습니다.' };
+
+    const outputChannel = this.running.get(serverId)?.outputChannel;
+    outputChannel?.show(true);
+    const result = await runBuildOnce(buildInfo, {
+      mavenCommand: this.getMavenCommand(),
+      gradleCommand: this.getGradleCommand(),
+      javaHome: server.javaHome,
+      log: msg => outputChannel?.appendLine(msg)
+    });
+    if (!result.ok) {
+      return { ok: false, reason: result.message ? `빌드 실패: ${result.message}` : '빌드가 실패했습니다.' };
+    }
+
+    await this.forceResyncClasses(serverId, contextPath);
+    return { ok: true };
+  }
+
+  /**
    * Manually triggers an immediate Java/resource compile + sync for a deployed exploded app,
    * for diagnosing/forcing the auto-build-on-change feature on demand. Returns a reason
    * string (no watcher, no Maven/Gradle project detected, auto-build disabled, etc.) when it

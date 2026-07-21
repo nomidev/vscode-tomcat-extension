@@ -79,6 +79,20 @@ export function runBuildOnce(
   const command = resolveCommand(buildInfo, options.mavenCommand ?? 'mvn', options.gradleCommand ?? 'gradle');
 
   const env: NodeJS.ProcessEnv = { ...process.env };
+
+  // Defensive: cmd.exe internals like `chcp` (actually chcp.com, an external file, not a
+  // true built-in) and mvn.cmd/gradle.bat's own batch-script internals can depend on
+  // C:\Windows\System32 being on PATH. If something upstream (a restrictive terminal profile,
+  // a customized PATH, etc.) dropped it, restore it rather than silently failing.
+  if (process.platform === 'win32') {
+    const windir = process.env.WINDIR || process.env.SystemRoot || 'C:\\Windows';
+    const system32 = path.join(windir, 'System32');
+    const currentPath = env.PATH ?? '';
+    if (!currentPath.toLowerCase().includes(system32.toLowerCase())) {
+      env.PATH = [currentPath, windir, system32].filter(Boolean).join(path.delimiter);
+    }
+  }
+
   if (options.javaHome) {
     env.JAVA_HOME = options.javaHome;
     const javaBin = path.join(options.javaHome, 'bin');
@@ -89,7 +103,13 @@ export function runBuildOnce(
   // On Windows, cmd.exe often uses a non-UTF8 codepage (e.g. CP949 on Korean systems), which
   // otherwise makes any non-ASCII output - including localized "command not found" messages -
   // show up as mojibake once decoded as UTF-8 on our end. Force UTF-8 first.
-  const commandToRun = process.platform === 'win32' ? `chcp 65001>nul && ${command}` : command;
+  // `&` (not `&&`) deliberately: chcp is only a best-effort encoding fix for readable log
+  // output, never something the actual build should depend on. With `&&`, a chcp failure
+  // (missing System32 in PATH, restricted environment, etc.) would silently prevent `command`
+  // from ever running at all - exactly the "command not found" symptom this caused before,
+  // even though mvn/gradle themselves were perfectly fine on PATH. `&` always runs the next
+  // command regardless of whether chcp succeeded.
+  const commandToRun = process.platform === 'win32' ? `chcp 65001>nul & ${command}` : command;
   log(`[build] running: ${command}`);
 
   return new Promise(resolve => {
