@@ -10,75 +10,22 @@ export interface BuildRunResult {
   message?: string;
 }
 
-export function buildExecutionEnvironment(baseEnv: NodeJS.ProcessEnv, javaHome?: string): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...baseEnv };
-
-  if (!javaHome) {
-    return env;
-  }
-
-  const javaBin = path.join(javaHome, 'bin');
-  const pathKey = Object.keys(env).find(k => k.toLowerCase() === 'path');
-  const existingPath = pathKey ? env[pathKey] ?? '' : '';
-  const pathSeparator = path.delimiter;
-
-  env.JAVA_HOME = javaHome;
-  env.PATH = existingPath ? `${javaBin}${pathSeparator}${existingPath}` : javaBin;
-  env.Path = env.PATH;
-
-  return env;
-}
-
 /** Resolves the actual command to run, preferring the project's own wrapper script
  *  (mvnw/gradlew) over a bare `mvn`/`gradle` on PATH when the corresponding setting is left
  *  at its default value. */
-interface BuildCommand {
-    command: string;
-    args: string[];
-}
+function resolveCommand(buildInfo: BuildInfo, mavenCommand: string, gradleCommand: string): string {
+  const isWin = process.platform === 'win32';
 
-function resolveCommand(
-    buildInfo: BuildInfo,
-    mavenCommand: string,
-    gradleCommand: string
-): BuildCommand {
+  if (buildInfo.tool === 'maven') {
+    const wrapper = path.join(buildInfo.projectRoot, isWin ? 'mvnw.cmd' : 'mvnw');
+    const cmd = mavenCommand === 'mvn' && fs.existsSync(wrapper) ? (isWin ? '.\\mvnw.cmd' : './mvnw') : mavenCommand;
+    return `${cmd} compile -q`;
+  }
 
-    const isWin = process.platform === "win32";
-
-    if (buildInfo.tool === "maven") {
-
-        const wrapper = path.join(
-            buildInfo.projectRoot,
-            isWin ? "mvnw.cmd" : "mvnw"
-        );
-
-        const command =
-            (mavenCommand === "mvn" || mavenCommand === "mvn.cmd")
-                && fs.existsSync(wrapper)
-                ? wrapper
-                : mavenCommand;
-
-        return {
-            command,
-            args: ["compile", "-q"]
-        };
-    }
-
-    const wrapper = path.join(
-        buildInfo.projectRoot,
-        isWin ? "gradlew.bat" : "gradlew"
-    );
-
-    const command =
-        (gradleCommand === "gradle" || gradleCommand === "gradle.bat")
-            && fs.existsSync(wrapper)
-            ? wrapper
-            : gradleCommand;
-
-    return {
-        command,
-        args: ["classes", "-q"]
-    };
+  const wrapper = path.join(buildInfo.projectRoot, isWin ? 'gradlew.bat' : 'gradlew');
+  const cmd =
+    gradleCommand === 'gradle' && fs.existsSync(wrapper) ? (isWin ? '.\\gradlew.bat' : './gradlew') : gradleCommand;
+  return `${cmd} classes -q`;
 }
 
 /** Recognizes a few very common failure signatures and logs a one-line pointer to the likely
@@ -129,56 +76,26 @@ export function runBuildOnce(
   options: { mavenCommand?: string; gradleCommand?: string; javaHome?: string; log?: Logger }
 ): Promise<BuildRunResult> {
   const log = options.log ?? (() => {});
-  const build = resolveCommand(
-    buildInfo,
-    options.mavenCommand ?? "mvn",
-    options.gradleCommand ?? "gradle"
-);
+  const command = resolveCommand(buildInfo, options.mavenCommand ?? 'mvn', options.gradleCommand ?? 'gradle');
 
-  const env = buildExecutionEnvironment({ ...process.env }, options.javaHome);
+  const env: NodeJS.ProcessEnv = { ...process.env };
   if (options.javaHome) {
+    env.JAVA_HOME = options.javaHome;
+    const javaBin = path.join(options.javaHome, 'bin');
+    env.PATH = `${javaBin}${path.delimiter}${env.PATH ?? ''}`;
     log(`[build] using JAVA_HOME = ${options.javaHome} (same as this server's Set Java Home)`);
   }
 
   // On Windows, cmd.exe often uses a non-UTF8 codepage (e.g. CP949 on Korean systems), which
   // otherwise makes any non-ASCII output - including localized "command not found" messages -
-  // show up as mojibake once decoded as UTF-8 on our end. Force UTF-8 first, but only when the
-  // active shell is actually cmd.exe-compatible.
-  log(
-    `[build] running: ${build.command} ${build.args.join(" ")}`
-);
-
-  // Debug: spawn 직전 환경/옵션 로깅
-  log(`[build-debug] command=${build.command}`);
-  log(`[build-debug] args=${JSON.stringify(build.args)}`);
-  log(`[build-debug] cwd=${buildInfo.projectRoot}`);
-  log(`[build-debug] JAVA_HOME=${env.JAVA_HOME}`);
-  log(`[build-debug] PATH=${env.PATH}`);
+  // show up as mojibake once decoded as UTF-8 on our end. Force UTF-8 first.
+  const commandToRun = process.platform === 'win32' ? `chcp 65001>nul && ${command}` : command;
+  log(`[build] running: ${command}`);
 
   return new Promise(resolve => {
     let child;
-    const isWin = process.platform === 'win32';
-    const cmdExe = process.env.ComSpec || 'C:\\Windows\\System32\\cmd.exe';
-    
     try {
-      child = isWin
-    ? spawn(
-        'cmd.exe',
-        ['/c', build.command, ...build.args],
-        {
-            cwd: buildInfo.projectRoot,
-            env,
-            windowsHide: true
-        }
-      )
-    : spawn(
-        build.command,
-        build.args,
-        {
-            cwd: buildInfo.projectRoot,
-            env
-        }
-      );
+      child = spawn(commandToRun, { cwd: buildInfo.projectRoot, shell: true, env });
     } catch (err: any) {
       const message = err?.message ?? String(err);
       log(`[build] failed to start: ${message}`);
