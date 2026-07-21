@@ -2,7 +2,7 @@
   "name": "vscode-tomcat",
   "displayName": "Tomcat for VSCode",
   "description": "IntelliJ IDEA style Apache Tomcat integration for VSCode: register servers, deploy WAR/exploded apps, start/stop/debug, view console logs.",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "publisher": "local-dev",
   "engines": {
     "vscode": "^1.85.0"
@@ -145,6 +145,7 @@
       { "command": "tomcat.openBrowser", "title": "Tomcat: Open in Browser", "icon": "$(globe)" },
       { "command": "tomcat.showLogs", "title": "Tomcat: Show Console Log", "icon": "$(output)" },
       { "command": "tomcat.refresh", "title": "Tomcat: Refresh", "icon": "$(refresh)" },
+      { "command": "tomcat.buildProject", "title": "Tomcat: Build Project", "icon": "$(wrench)" },
       { "command": "tomcat.editPorts", "title": "Tomcat: Edit Ports", "icon": "$(settings-gear)" },
       { "command": "tomcat.editJavaHome", "title": "Tomcat: Set Java Home...", "icon": "$(coffee)" },
       { "command": "tomcat.setLogLevel", "title": "Tomcat: Set Log Level...", "icon": "$(output)" },
@@ -160,7 +161,8 @@
       "view/title": [
         { "command": "tomcat.addServer", "when": "view =~ /^tomcatServers/", "group": "navigation@1" },
         { "command": "tomcat.refresh", "when": "view =~ /^tomcatServers/", "group": "navigation@2" },
-        { "command": "tomcat.openSettings", "when": "view =~ /^tomcatServers/", "group": "navigation@3" }
+        { "command": "tomcat.openSettings", "when": "view =~ /^tomcatServers/", "group": "navigation@3" },
+        { "command": "tomcat.buildProject", "when": "view =~ /^tomcatServers/", "group": "navigation@4" }
       ],
       "view/item/context": [
         { "command": "tomcat.startServer", "when": "view =~ /^tomcatServers/ && viewItem == tomcatServer-stopped", "group": "inline@1" },
@@ -174,23 +176,26 @@
         { "command": "tomcat.restartServer", "when": "view =~ /^tomcatServers/ && viewItem =~ /tomcatServer-(running|debugging)/", "group": "1_run@2" },
         { "command": "tomcat.deployWar", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatServer-/", "group": "2_deploy@1" },
         { "command": "tomcat.deployExploded", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatServer-/", "group": "2_deploy@2" },
-        { "command": "tomcat.showLogs", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatServer-/", "group": "3_misc@1" },
-        { "command": "tomcat.editPorts", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatServer-/", "group": "3_misc@2" },
-        { "command": "tomcat.editJavaHome", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatServer-/", "group": "3_misc@3" },
-        { "command": "tomcat.setLogLevel", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatServer-/", "group": "3_misc@4" },
-        { "command": "tomcat.editVmOptions", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatServer-/", "group": "3_misc@5" },
-        { "command": "tomcat.resetManagerCredentials", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatServer-/", "group": "3_misc@6" },
+        { "command": "tomcat.buildProject", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatServer-/", "group": "3_misc@1" },
+        { "command": "tomcat.showLogs", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatServer-/", "group": "3_misc@2" },
+        { "command": "tomcat.editPorts", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatServer-/", "group": "3_misc@3" },
+        { "command": "tomcat.editJavaHome", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatServer-/", "group": "3_misc@4" },
+        { "command": "tomcat.setLogLevel", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatServer-/", "group": "3_misc@5" },
+        { "command": "tomcat.editVmOptions", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatServer-/", "group": "3_misc@6" },
+        { "command": "tomcat.resetManagerCredentials", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatServer-/", "group": "3_misc@7" },
         { "command": "tomcat.removeServer", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatServer-/", "group": "4_delete@1" },
 
         { "command": "tomcat.openBrowser", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatApp-/", "group": "inline@1" },
         { "command": "tomcat.undeploy", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatApp-/", "group": "inline@2" },
+        { "command": "tomcat.buildProject", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatApp-/", "group": "inline@3" },
         { "command": "tomcat.openBrowser", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatApp-/", "group": "1_app@1" },
         { "command": "tomcat.undeploy", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatApp-/", "group": "1_app@2" },
-        { "command": "tomcat.addSourceOverlay", "when": "view =~ /^tomcatServers/ && viewItem == tomcatApp-exploded", "group": "1_app@3" },
-        { "command": "tomcat.reloadContext", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatApp-/", "group": "inline@3" },
-        { "command": "tomcat.reloadContext", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatApp-/", "group": "1_app@4" },
-        { "command": "tomcat.forceResyncClasses", "when": "view =~ /^tomcatServers/ && viewItem == tomcatApp-exploded", "group": "1_app@5" },
-        { "command": "tomcat.toggleAutoReload", "when": "view =~ /^tomcatServers/ && viewItem == tomcatApp-exploded", "group": "1_app@6" }
+        { "command": "tomcat.buildProject", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatApp-/", "group": "1_app@3" },
+        { "command": "tomcat.addSourceOverlay", "when": "view =~ /^tomcatServers/ && viewItem == tomcatApp-exploded", "group": "1_app@4" },
+        { "command": "tomcat.reloadContext", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatApp-/", "group": "inline@4" },
+        { "command": "tomcat.reloadContext", "when": "view =~ /^tomcatServers/ && viewItem =~ /^tomcatApp-/", "group": "1_app@5" },
+        { "command": "tomcat.forceResyncClasses", "when": "view =~ /^tomcatServers/ && viewItem == tomcatApp-exploded", "group": "1_app@6" },
+        { "command": "tomcat.toggleAutoReload", "when": "view =~ /^tomcatServers/ && viewItem == tomcatApp-exploded", "group": "1_app@7" }
       ]
     }
   },

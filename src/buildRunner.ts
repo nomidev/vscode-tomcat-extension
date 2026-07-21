@@ -16,11 +16,16 @@ export function buildCommandForExecution(command: string, platform: string, shel
   }
 
   const normalizedShell = (shellPath ?? '').toLowerCase();
-  if (normalizedShell.includes('powershell') || normalizedShell.includes('pwsh') || normalizedShell.includes('bash')) {
+  if (!normalizedShell) {
     return command;
   }
 
-  return `chcp 65001>nul && ${command}`;
+  const shellName = path.basename(normalizedShell);
+  if (shellName === 'cmd.exe' || shellName === 'cmd') {
+    return `chcp 65001>nul && ${command}`;
+  }
+
+  return command;
 }
 
 /** Resolves the actual command to run, preferring the project's own wrapper script

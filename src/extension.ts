@@ -5,8 +5,9 @@ import { ServerManager } from './serverManager';
 import { TomcatTreeProvider, ServerTreeItem, AppTreeItem } from './tomcatTreeProvider';
 import { findMetaInfContext, parseMetaInfContext } from './contextXml';
 import { LOG_LEVELS, TomcatServerConfig } from './model';
-import { detectWebappSource } from './sourceOverlay';
+import { detectBuildInfo, detectWebappSource, findProjectRoot } from './sourceOverlay';
 import { hasManagerApp, ensureManagerUser, resetManagerUser, reloadContext } from './tomcatManager';
+import { runBuildOnce } from './buildRunner';
 
 let activeManager: ServerManager | undefined;
 
@@ -190,7 +191,67 @@ export function activate(context: vscode.ExtensionContext) {
     );
   }
 
+  async function reloadTargetApps(server: TomcatServerConfig, target: ServerTreeItem | AppTreeItem): Promise<void> {
+    const status = manager.getStatus(server.id);
+    if (status !== 'running' && status !== 'debugging') {
+      return;
+    }
+
+    const contextPaths =
+      target instanceof AppTreeItem
+        ? [target.app.contextPath].filter(Boolean)
+        : target.server.deployedApps.map(app => app.contextPath).filter(Boolean);
+
+    await Promise.all(contextPaths.map(contextPath => ensureContextReloaded(server, contextPath, { quiet: true })));
+  }
+
+  async function runBuildForTarget(target: ServerTreeItem | AppTreeItem): Promise<void> {
+    const server = target.server;
+    const candidates = target instanceof AppTreeItem
+      ? [target.app.sourcePath, target.app.sourceOverlayPath]
+      : target.server.deployedApps.flatMap(app => [app.sourcePath, app.sourceOverlayPath]);
+
+    const projectRoot = candidates
+      .filter((value): value is string => !!value)
+      .map(value => findProjectRoot(value))
+      .find((value): value is string => !!value);
+
+    if (!projectRoot) {
+      vscode.window.showWarningMessage('이 항목에서 Maven/Gradle 프로젝트 루트를 찾을 수 없습니다.');
+      return;
+    }
+
+    const buildInfo = detectBuildInfo(projectRoot);
+    if (!buildInfo) {
+      vscode.window.showWarningMessage('Maven/Gradle 프로젝트가 아니어서 빌드를 실행할 수 없습니다.');
+      return;
+    }
+
+    const channel = manager.getOutputChannel(server.id);
+    channel?.show(true);
+    channel?.appendLine(`[build] Manual build requested for ${projectRoot}`);
+
+    await reloadTargetApps(server, target);
+
+    const result = await runBuildOnce(buildInfo, {
+      javaHome: server.javaHome,
+      log: message => channel?.appendLine(message)
+    });
+
+    if (result.ok) {
+      await reloadTargetApps(server, target);
+      vscode.window.showInformationMessage(`"${server.name}" 의 프로젝트 빌드를 완료하고 앱을 다시 불러왔습니다.`);
+    } else {
+      vscode.window.showWarningMessage(`"${server.name}" 의 프로젝트 빌드가 실패했습니다: ${result.message ?? 'unknown error'}`);
+    }
+  }
+
   reg('tomcat.refresh', () => treeProvider.refresh());
+
+  reg('tomcat.buildProject', async (item: ServerTreeItem | AppTreeItem | undefined) => {
+    if (!item) return;
+    await runBuildForTarget(item);
+  });
 
   reg('tomcat.addServer', async () => {
     const uris = await vscode.window.showOpenDialog({

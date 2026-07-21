@@ -10,6 +10,10 @@ test('skips chcp for non-cmd shells on Windows', () => {
   assert.equal(buildCommandForExecution('mvn compile -q', 'win32', 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'), 'mvn compile -q');
 });
 
+test('does not prepend chcp when the Windows shell is unknown', () => {
+  assert.equal(buildCommandForExecution('mvn compile -q', 'win32', ''), 'mvn compile -q');
+});
+
 test('does not change commands on non-Windows platforms', () => {
   assert.equal(buildCommandForExecution('mvn compile -q', 'linux', 'bash'), 'mvn compile -q');
 });
