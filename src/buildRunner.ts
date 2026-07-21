@@ -17,6 +17,24 @@ export function buildCommandForExecution(command: string, platform: string, shel
   return command;
 }
 
+export function buildExecutionEnvironment(baseEnv: NodeJS.ProcessEnv, javaHome?: string): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = { ...baseEnv };
+
+  if (!javaHome) {
+    return env;
+  }
+
+  const javaBin = path.join(javaHome, 'bin');
+  const existingPath = env.PATH ?? env.Path ?? '';
+  const pathSeparator = path.delimiter;
+
+  env.JAVA_HOME = javaHome;
+  env.PATH = existingPath ? `${javaBin}${pathSeparator}${existingPath}` : javaBin;
+  env.Path = env.PATH;
+
+  return env;
+}
+
 /** Resolves the actual command to run, preferring the project's own wrapper script
  *  (mvnw/gradlew) over a bare `mvn`/`gradle` on PATH when the corresponding setting is left
  *  at its default value. */
@@ -85,11 +103,8 @@ export function runBuildOnce(
   const log = options.log ?? (() => {});
   const command = resolveCommand(buildInfo, options.mavenCommand ?? 'mvn', options.gradleCommand ?? 'gradle');
 
-  const env: NodeJS.ProcessEnv = { ...process.env };
+  const env = buildExecutionEnvironment({ ...process.env }, options.javaHome);
   if (options.javaHome) {
-    env.JAVA_HOME = options.javaHome;
-    const javaBin = path.join(options.javaHome, 'bin');
-    env.PATH = `${javaBin}${path.delimiter}${env.PATH ?? ''}`;
     log(`[build] using JAVA_HOME = ${options.javaHome} (same as this server's Set Java Home)`);
   }
 
