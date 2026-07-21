@@ -100,12 +100,20 @@ export function runBuildOnce(
   const commandToRun = buildCommandForExecution(command, process.platform, process.env.ComSpec);
   log(`[build] running: ${command}`);
 
+  // Debug: spawn 직전 환경/옵션 로깅
+  const shellOption = process.platform === 'win32' ? (process.env.ComSpec || true) : true;
+  log(`[build-debug] commandToRun: ${commandToRun}`);
+  log(`[build-debug] shellOption: ${String(shellOption)}`);
+  log(`[build-debug] cwd: ${buildInfo.projectRoot}`);
+  log(`[build-debug] JAVA_HOME (options/env): ${options.javaHome ?? env.JAVA_HOME ?? 'undefined'}`);
+  log(`[build-debug] PATH: ${env.PATH ?? ''}`);
+
   return new Promise(resolve => {
     let child;
     try {
       child = spawn(commandToRun, {
         cwd: buildInfo.projectRoot,
-        shell: process.platform === 'win32' ? (process.env.ComSpec || true) : true,
+        shell: shellOption,
         env
       });
     } catch (err: any) {
