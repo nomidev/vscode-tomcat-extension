@@ -140,7 +140,8 @@ function callManager(
   server: TomcatServerConfig,
   creds: ManagerCredentials,
   command: string,
-  params: Record<string, string>
+  params: Record<string, string>,
+  timeoutMs: number = 45000
 ): Promise<ManagerResult> {
   const query = new URLSearchParams(params).toString();
   const options: http.RequestOptions = {
@@ -149,7 +150,7 @@ function callManager(
     path: `/manager/text/${command}?${query}`,
     method: 'GET',
     auth: `${creds.username}:${creds.password}`,
-    timeout: 8000
+    timeout: timeoutMs
   };
 
   return new Promise(resolve => {
@@ -163,7 +164,13 @@ function callManager(
     });
     req.on('timeout', () => {
       req.destroy();
-      resolve({ ok: false, message: '요청 시간 초과' });
+      resolve({
+        ok: false,
+        message:
+          `요청 시간 초과 (${Math.round(timeoutMs / 1000)}초). 리로드 자체는 서버에서 계속 진행 중일 수 있습니다 ` +
+          `(빈이 많은 큰 애플리케이션은 컨텍스트 재로드에 시간이 걸릴 수 있어요) - 서버 콘솔 로그에서 완료됐는지 확인해보세요. ` +
+          `필요하면 tomcat.managerRequestTimeoutSeconds 설정으로 대기 시간을 늘릴 수 있습니다.`
+      });
     });
     req.on('error', err => resolve({ ok: false, message: err.message }));
     req.end();
@@ -175,7 +182,8 @@ function callManager(
 export function reloadContext(
   server: TomcatServerConfig,
   creds: ManagerCredentials,
-  contextPath: string
+  contextPath: string,
+  timeoutMs?: number
 ): Promise<ManagerResult> {
-  return callManager(server, creds, 'reload', { path: contextPath || '/' });
+  return callManager(server, creds, 'reload', { path: contextPath || '/' }, timeoutMs);
 }

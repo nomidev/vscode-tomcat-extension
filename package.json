@@ -2,7 +2,7 @@
   "name": "vscode-tomcat",
   "displayName": "Tomcat for VSCode",
   "description": "IntelliJ IDEA style Apache Tomcat integration for VSCode: register servers, deploy WAR/exploded apps, start/stop/debug, view console logs.",
-  "version": "0.8.0",
+  "version": "0.9.1",
   "publisher": "local-dev",
   "engines": {
     "vscode": "^1.85.0"
@@ -63,7 +63,27 @@
         "tomcat.javaAutoBuild": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "라이브 소스 리로드가 켜진 Maven/Gradle exploded 앱에서, 컴파일된 클래스/리소스 출력 폴더(Maven `target/classes`, Gradle `build/classes/java/main` + `build/resources/main`)를 감시하다가 변경 시 배포된 `WEB-INF/classes` 로 실시간 동기화할지 여부입니다. **이 확장은 `mvn`/`gradle` 을 직접 실행하지 않습니다** — 실제 컴파일은 VSCode의 Java 자동 빌드(저장 시), 터미널에서의 수동 빌드 등 기존 빌드 도구가 담당하고, 그 결과물만 감시해서 복사합니다."
+          "markdownDescription": "라이브 소스 리로드가 켜진 Maven/Gradle exploded 앱에서, 컴파일된 클래스/리소스 출력 폴더(Maven `target/classes`, Gradle `build/classes/java/main` + `build/resources/main`)를 감시하다가 변경 시 배포된 `WEB-INF/classes` 로 실시간 동기화할지 여부입니다. 저장할 때마다 이 확장이 직접 `mvn`/`gradle` 을 실행하지는 않습니다 — 실제 컴파일은 VSCode의 Java 자동 빌드(저장 시), 터미널에서의 수동 빌드 등 기존 빌드 도구가 담당하고, 그 결과물만 감시해서 복사합니다."
+        },
+        "tomcat.buildBeforeStart": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "켜면(기본값) 라이브 리로드가 켜진 Maven/Gradle exploded 앱에 대해, Tomcat 을 실제로 기동하기 **직전에 딱 한 번** 그 프로젝트의 컴파일 명령(`mvn compile -q` 또는 `gradle classes -q`)을 실행하고 끝날 때까지 기다립니다. 이 서버의 **Set Java Home** 과 동일한 JDK 로 실행됩니다. 저장할 때마다 실행되는 게 아니라 시작 시점에만 실행되며, 빌드가 실패해도 Tomcat 시작 자체를 막지는 않고(경고만 로그에 남기고) 이미 컴파일되어 있던 내용으로 계속 진행합니다."
+        },
+        "tomcat.mavenCommand": {
+          "type": "string",
+          "default": "mvn",
+          "description": "tomcat.buildBeforeStart 에 사용할 Maven 실행 명령. 프로젝트에 mvnw(mvnw.cmd) 래퍼가 있으면 기본값(mvn)일 때 자동으로 래퍼를 우선 사용합니다."
+        },
+        "tomcat.gradleCommand": {
+          "type": "string",
+          "default": "gradle",
+          "description": "tomcat.buildBeforeStart 에 사용할 Gradle 실행 명령. 프로젝트에 gradlew(gradlew.bat) 래퍼가 있으면 기본값(gradle)일 때 자동으로 래퍼를 우선 사용합니다."
+        },
+        "tomcat.managerRequestTimeoutSeconds": {
+          "type": "number",
+          "default": 45,
+          "description": "\"Reload Context Now\" 등 Tomcat Manager API 호출의 응답 대기 시간(초). 빈이 많은 큰 애플리케이션은 컨텍스트 재로드에 시간이 걸릴 수 있어, 기본 45초로 넉넉하게 잡혀 있습니다. 계속 시간 초과가 나면 늘려보세요."
         },
         "tomcat.excludeDefaultWebapps": {
           "type": "boolean",

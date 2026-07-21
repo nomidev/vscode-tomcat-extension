@@ -13,6 +13,7 @@ import {
 import { SourceSyncWatcher } from './sourceSync';
 import { JavaBuildSyncWatcher } from './javaBuildSync';
 import { findProjectRoot, detectBuildInfo } from './sourceOverlay';
+import { runBuildOnce } from './buildRunner';
 
 const CONFIG_SECTION = 'tomcat';
 const CONFIG_KEY = 'servers';
@@ -91,6 +92,20 @@ export class ServerManager {
    *  whenever the live source overlay is enabled for a Maven/Gradle app. */
   isJavaAutoBuildEnabled(): boolean {
     return vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>('javaAutoBuild', true);
+  }
+
+  /** Whether to run the project's compile command once, right before Tomcat starts, for any
+   *  exploded app with live reload enabled on a detected Maven/Gradle project. */
+  isBuildBeforeStartEnabled(): boolean {
+    return vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>('buildBeforeStart', true);
+  }
+
+  getMavenCommand(): string {
+    return vscode.workspace.getConfiguration(CONFIG_SECTION).get<string>('mavenCommand', 'mvn');
+  }
+
+  getGradleCommand(): string {
+    return vscode.workspace.getConfiguration(CONFIG_SECTION).get<string>('gradleCommand', 'gradle');
   }
 
   /** Whether Tomcat's own bundled sample/admin webapps (ROOT, docs, examples, host-manager)
@@ -266,6 +281,43 @@ export class ServerManager {
    * waits for one immediate resync before returning (used right before Tomcat starts, so it
    * boots against whatever's currently built).
    */
+  /**
+   * If `tomcat.buildBeforeStart` is enabled and `overlayPath`/`docBase` sit inside a
+   * detectable Maven/Gradle project, runs that project's compile command once (using this
+   * server's configured Java Home, so it always matches whatever JDK actually runs Tomcat)
+   * and waits for it to finish before returning. Silently does nothing if disabled or no
+   * project could be detected. Never throws - a build failure is logged to the server's
+   * output channel and otherwise ignored, so it can never prevent Tomcat itself from
+   * starting; the point is "best-effort freshness", not a hard gate.
+   */
+  private async maybeRunBuildBeforeStart(
+    server: TomcatServerConfig,
+    overlayPath: string,
+    docBase: string,
+    outputChannel: vscode.OutputChannel
+  ): Promise<void> {
+    if (!this.isBuildBeforeStartEnabled()) return;
+
+    const projectRoot = findProjectRoot(overlayPath) ?? findProjectRoot(docBase);
+    if (!projectRoot) return;
+
+    const buildInfo = detectBuildInfo(projectRoot);
+    if (!buildInfo) return;
+
+    outputChannel.appendLine(`[Tomcat] Running pre-start build for ${projectRoot}...`);
+    const result = await runBuildOnce(buildInfo, {
+      mavenCommand: this.getMavenCommand(),
+      gradleCommand: this.getGradleCommand(),
+      javaHome: server.javaHome,
+      log: msg => outputChannel.appendLine(msg)
+    });
+    if (!result.ok) {
+      outputChannel.appendLine(
+        `[Tomcat] Warning: pre-start build failed, starting anyway with whatever's already compiled.`
+      );
+    }
+  }
+
   private async maybeStartJavaBuildSync(
     serverId: string,
     contextPath: string,
@@ -413,16 +465,26 @@ export class ServerManager {
     }
 
     // Start (or refresh) live source-link watchers for any exploded app with an overlay
-    // configured, and sync whatever's currently in the Maven/Gradle output folder(s) into
-    // WEB-INF/classes right now, so Tomcat boots against up-to-date classes/resources. No
-    // build is run here - only whatever's already been compiled (by VSCode's Java language
-    // server, a manual mvn/gradle build, etc.) gets copied over.
+    // configured. For each one on a detected Maven/Gradle project, optionally run the
+    // project's compile command once first (tomcat.buildBeforeStart) and then sync whatever's
+    // now in the output folder(s) into WEB-INF/classes, so Tomcat boots against up-to-date
+    // classes/resources. A build failure here is logged but never blocks Tomcat from starting.
     const presyncTasks: Promise<void>[] = [];
     for (const app of server.deployedApps) {
       if (app.type === 'exploded' && app.sourceOverlayPath) {
         this.startSourceSync(id, app.contextPath, app.sourceOverlayPath, app.sourcePath);
         presyncTasks.push(
-          this.maybeStartJavaBuildSync(id, app.contextPath, app.sourcePath, app.sourceOverlayPath, true, outputChannel)
+          (async () => {
+            await this.maybeRunBuildBeforeStart(server, app.sourceOverlayPath!, app.sourcePath, outputChannel);
+            await this.maybeStartJavaBuildSync(
+              id,
+              app.contextPath,
+              app.sourcePath,
+              app.sourceOverlayPath!,
+              true,
+              outputChannel
+            );
+          })()
         );
       }
     }

@@ -26,6 +26,54 @@ export function activate(context: vscode.ExtensionContext) {
   });
   context.subscriptions.push(explorerTreeView);
 
+  // --- Hot-swap failure notifications -------------------------------------------------
+  // The Java debugger ("Debugger for Java") does its own Hot Code Replace when you save a
+  // .java file while attached, entirely outside this extension's control. Its exact custom
+  // Debug Adapter Protocol event schema for reporting hot-swap failures isn't something we
+  // can rely on with full certainty, so this listens broadly: every custom event from a
+  // debug session we recognize as one we started (name matches "Attach to <server>") gets
+  // logged to that server's output channel for visibility, and anything that looks like a
+  // hot-swap-related failure (event name or body mentioning both "hotcodereplace"/"hotswap"
+  // and "error"/"fail") triggers a warning toast with a concrete next step - since a generic
+  // Java-debugger failure message wouldn't know "Reload Context Now" exists.
+  const debugSessionServers = new Map<string, TomcatServerConfig>();
+
+  context.subscriptions.push(
+    vscode.debug.onDidStartDebugSession(session => {
+      const server = manager.getServers().find(s => session.name === `Attach to ${s.name}`);
+      if (server) {
+        debugSessionServers.set(session.id, server);
+      }
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.debug.onDidTerminateDebugSession(session => {
+      debugSessionServers.delete(session.id);
+    })
+  );
+
+  context.subscriptions.push(
+    vscode.debug.onDidReceiveDebugSessionCustomEvent(e => {
+      const server = debugSessionServers.get(e.session.id);
+      if (!server) return;
+
+      const channel = manager.getOutputChannel(server.id);
+      channel?.appendLine(`[debug] custom event: ${e.event} ${JSON.stringify(e.body ?? {})}`);
+
+      const eventName = (e.event ?? '').toLowerCase();
+      const bodyText = JSON.stringify(e.body ?? {}).toLowerCase();
+      const mentionsHotSwap = eventName.includes('hotcodereplace') || eventName.includes('hotswap');
+      const mentionsFailure = eventName.includes('error') || /error|fail/.test(bodyText);
+
+      if (mentionsHotSwap && mentionsFailure) {
+        vscode.window.showWarningMessage(
+          `"${server.name}" 에서 핫스왑(코드 교체)이 실패한 것 같습니다. 필드/메서드/클래스 추가 같은 구조적 변경이라면 정상적인 제약이니, 배포된 앱을 우클릭해 "Reload Context Now" 로 반영해보세요.`
+        );
+      }
+    })
+  );
+
   // Wraps every command handler so an unexpected exception anywhere (a filesystem error, a
   // bad state assumption, etc.) always surfaces as a clear message instead of failing
   // silently or with just a generic "command failed" notification - the debugger-attach bug
@@ -106,7 +154,8 @@ export function activate(context: vscode.ExtensionContext) {
       return;
     }
 
-    const result = await reloadContext(server, creds, contextPath);
+    const timeoutSeconds = vscode.workspace.getConfiguration('tomcat').get<number>('managerRequestTimeoutSeconds', 45);
+    const result = await reloadContext(server, creds, contextPath, timeoutSeconds * 1000);
     const channel = manager.getOutputChannel(server.id);
     channel?.appendLine(`[manager] reload ${contextPath || '/'}: ${result.message}`);
 
