@@ -11,20 +11,9 @@ export interface BuildRunResult {
 }
 
 export function buildCommandForExecution(command: string, platform: string, shellPath?: string): string {
-  if (platform !== 'win32') {
-    return command;
-  }
-
-  const normalizedShell = (shellPath ?? '').toLowerCase();
-  if (!normalizedShell) {
-    return command;
-  }
-
-  const shellName = path.basename(normalizedShell);
-  if (shellName === 'cmd.exe' || shellName === 'cmd') {
-    return `chcp 65001>nul && ${command}`;
-  }
-
+  // Avoid prepending `chcp` to the build command on Windows. The encoding tweak is fragile
+  // across shells and is not necessary for Maven/Gradle builds themselves, while the old
+  // prefix was the source of the false failures users were seeing.
   return command;
 }
 
