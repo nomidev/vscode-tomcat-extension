@@ -10,13 +10,6 @@ export interface BuildRunResult {
   message?: string;
 }
 
-export function buildCommandForExecution(command: string, platform: string, shellPath?: string): string {
-  // Avoid prepending `chcp` to the build command on Windows. The encoding tweak is fragile
-  // across shells and is not necessary for Maven/Gradle builds themselves, while the old
-  // prefix was the source of the false failures users were seeing.
-  return command;
-}
-
 export function buildExecutionEnvironment(baseEnv: NodeJS.ProcessEnv, javaHome?: string): NodeJS.ProcessEnv {
   const env: NodeJS.ProcessEnv = { ...baseEnv };
 
@@ -25,7 +18,8 @@ export function buildExecutionEnvironment(baseEnv: NodeJS.ProcessEnv, javaHome?:
   }
 
   const javaBin = path.join(javaHome, 'bin');
-  const existingPath = env.PATH ?? env.Path ?? '';
+  const pathKey = Object.keys(env).find(k => k.toLowerCase() === 'path');
+  const existingPath = pathKey ? env[pathKey] ?? '' : '';
   const pathSeparator = path.delimiter;
 
   env.JAVA_HOME = javaHome;
@@ -38,19 +32,53 @@ export function buildExecutionEnvironment(baseEnv: NodeJS.ProcessEnv, javaHome?:
 /** Resolves the actual command to run, preferring the project's own wrapper script
  *  (mvnw/gradlew) over a bare `mvn`/`gradle` on PATH when the corresponding setting is left
  *  at its default value. */
-function resolveCommand(buildInfo: BuildInfo, mavenCommand: string, gradleCommand: string): string {
-  const isWin = process.platform === 'win32';
+interface BuildCommand {
+    command: string;
+    args: string[];
+}
 
-  if (buildInfo.tool === 'maven') {
-    const wrapper = path.join(buildInfo.projectRoot, isWin ? 'mvnw.cmd' : 'mvnw');
-    const cmd = mavenCommand === 'mvn' && fs.existsSync(wrapper) ? (isWin ? '.\\mvnw.cmd' : './mvnw') : mavenCommand;
-    return `${cmd} compile -q`;
-  }
+function resolveCommand(
+    buildInfo: BuildInfo,
+    mavenCommand: string,
+    gradleCommand: string
+): BuildCommand {
 
-  const wrapper = path.join(buildInfo.projectRoot, isWin ? 'gradlew.bat' : 'gradlew');
-  const cmd =
-    gradleCommand === 'gradle' && fs.existsSync(wrapper) ? (isWin ? '.\\gradlew.bat' : './gradlew') : gradleCommand;
-  return `${cmd} classes -q`;
+    const isWin = process.platform === "win32";
+
+    if (buildInfo.tool === "maven") {
+
+        const wrapper = path.join(
+            buildInfo.projectRoot,
+            isWin ? "mvnw.cmd" : "mvnw"
+        );
+
+        const command =
+            (mavenCommand === "mvn" || mavenCommand === "mvn.cmd")
+                && fs.existsSync(wrapper)
+                ? wrapper
+                : mavenCommand;
+
+        return {
+            command,
+            args: ["compile", "-q"]
+        };
+    }
+
+    const wrapper = path.join(
+        buildInfo.projectRoot,
+        isWin ? "gradlew.bat" : "gradlew"
+    );
+
+    const command =
+        (gradleCommand === "gradle" || gradleCommand === "gradle.bat")
+            && fs.existsSync(wrapper)
+            ? wrapper
+            : gradleCommand;
+
+    return {
+        command,
+        args: ["classes", "-q"]
+    };
 }
 
 /** Recognizes a few very common failure signatures and logs a one-line pointer to the likely
@@ -101,7 +129,11 @@ export function runBuildOnce(
   options: { mavenCommand?: string; gradleCommand?: string; javaHome?: string; log?: Logger }
 ): Promise<BuildRunResult> {
   const log = options.log ?? (() => {});
-  const command = resolveCommand(buildInfo, options.mavenCommand ?? 'mvn', options.gradleCommand ?? 'gradle');
+  const build = resolveCommand(
+    buildInfo,
+    options.mavenCommand ?? "mvn",
+    options.gradleCommand ?? "gradle"
+);
 
   const env = buildExecutionEnvironment({ ...process.env }, options.javaHome);
   if (options.javaHome) {
@@ -112,25 +144,41 @@ export function runBuildOnce(
   // otherwise makes any non-ASCII output - including localized "command not found" messages -
   // show up as mojibake once decoded as UTF-8 on our end. Force UTF-8 first, but only when the
   // active shell is actually cmd.exe-compatible.
-  const commandToRun = buildCommandForExecution(command, process.platform, process.env.ComSpec);
-  log(`[build] running: ${command}`);
+  log(
+    `[build] running: ${build.command} ${build.args.join(" ")}`
+);
 
   // Debug: spawn 직전 환경/옵션 로깅
-  const shellOption = process.platform === 'win32' ? (process.env.ComSpec || true) : true;
-  log(`[build-debug] commandToRun: ${commandToRun}`);
-  log(`[build-debug] shellOption: ${String(shellOption)}`);
-  log(`[build-debug] cwd: ${buildInfo.projectRoot}`);
-  log(`[build-debug] JAVA_HOME (options/env): ${options.javaHome ?? env.JAVA_HOME ?? 'undefined'}`);
-  log(`[build-debug] PATH: ${env.PATH ?? ''}`);
+  log(`[build-debug] command=${build.command}`);
+  log(`[build-debug] args=${JSON.stringify(build.args)}`);
+  log(`[build-debug] cwd=${buildInfo.projectRoot}`);
+  log(`[build-debug] JAVA_HOME=${env.JAVA_HOME}`);
+  log(`[build-debug] PATH=${env.PATH}`);
 
   return new Promise(resolve => {
     let child;
+    const isWin = process.platform === 'win32';
+    const cmdExe = process.env.ComSpec || 'C:\\Windows\\System32\\cmd.exe';
+    
     try {
-      child = spawn(commandToRun, {
-        cwd: buildInfo.projectRoot,
-        shell: shellOption,
-        env
-      });
+      child = isWin
+    ? spawn(
+        'cmd.exe',
+        ['/c', build.command, ...build.args],
+        {
+            cwd: buildInfo.projectRoot,
+            env,
+            windowsHide: true
+        }
+      )
+    : spawn(
+        build.command,
+        build.args,
+        {
+            cwd: buildInfo.projectRoot,
+            env
+        }
+      );
     } catch (err: any) {
       const message = err?.message ?? String(err);
       log(`[build] failed to start: ${message}`);
