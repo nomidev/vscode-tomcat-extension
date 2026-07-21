@@ -58,6 +58,30 @@ function logKnownFailureHint(output: string, log: Logger): void {
   }
 }
 
+/** Returns the shell command to execute. Avoids prepending `chcp 65001` on Windows because
+ *  that breaks under PowerShell and when PATH/Path no longer includes System32. */
+export function buildCommandForExecution(
+  command: string,
+  _platform: NodeJS.Platform = process.platform,
+  _shellPath: string = process.env.ComSpec ?? process.env.SHELL ?? ''
+): string {
+  return command;
+}
+
+/** Clones `baseEnv` and prepends the given JDK's `bin` to PATH (and Path on Windows). */
+export function buildExecutionEnvironment(baseEnv: NodeJS.ProcessEnv, javaHome: string): NodeJS.ProcessEnv {
+  const env = { ...baseEnv };
+  env.JAVA_HOME = javaHome;
+  const javaBin = path.join(javaHome, 'bin');
+  const existingPath = env.PATH ?? env.Path ?? '';
+  const newPath = `${javaBin}${path.delimiter}${existingPath}`;
+  env.PATH = newPath;
+  if (process.platform === 'win32') {
+    env.Path = newPath;
+  }
+  return env;
+}
+
 /**
  * Runs the project's compile command exactly once and waits for it to finish - used right
  * before Tomcat starts, so it boots against freshly-built classes rather than whatever
@@ -78,18 +102,13 @@ export function runBuildOnce(
   const log = options.log ?? (() => {});
   const command = resolveCommand(buildInfo, options.mavenCommand ?? 'mvn', options.gradleCommand ?? 'gradle');
 
-  const env: NodeJS.ProcessEnv = { ...process.env };
+  let env: NodeJS.ProcessEnv = { ...process.env };
   if (options.javaHome) {
-    env.JAVA_HOME = options.javaHome;
-    const javaBin = path.join(options.javaHome, 'bin');
-    env.PATH = `${javaBin}${path.delimiter}${env.PATH ?? ''}`;
+    env = buildExecutionEnvironment(env, options.javaHome);
     log(`[build] using JAVA_HOME = ${options.javaHome} (same as this server's Set Java Home)`);
   }
 
-  // On Windows, cmd.exe often uses a non-UTF8 codepage (e.g. CP949 on Korean systems), which
-  // otherwise makes any non-ASCII output - including localized "command not found" messages -
-  // show up as mojibake once decoded as UTF-8 on our end. Force UTF-8 first.
-  const commandToRun = process.platform === 'win32' ? `chcp 65001>nul && ${command}` : command;
+  const commandToRun = buildCommandForExecution(command);
   log(`[build] running: ${command}`);
 
   return new Promise(resolve => {
