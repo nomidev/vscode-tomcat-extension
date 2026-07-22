@@ -310,15 +310,6 @@ export class ServerManager {
   }
 
   /**
-   * If class-sync is enabled and `overlayPath`/`docBase` sit inside a detectable Maven/Gradle
-   * project, starts (or restarts) a watcher that mirrors that project's compiled-output
-   * folder(s) into `docBase/WEB-INF/classes` live (see JavaBuildSyncWatcher - no build is
-   * ever run by this extension). Silently does nothing if disabled or no project could be
-   * detected (e.g. a hand-picked, non-standard overlay path). When `runInitialSync` is true,
-   * waits for one immediate resync before returning (used right before Tomcat starts, so it
-   * boots against whatever's currently built).
-   */
-  /**
    * If `tomcat.buildBeforeStart` is enabled and `overlayPath`/`docBase` sit inside a
    * detectable Maven/Gradle project, runs that project's compile command once (using this
    * server's configured Java Home, so it always matches whatever JDK actually runs Tomcat)

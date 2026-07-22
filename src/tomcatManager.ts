@@ -89,9 +89,9 @@ function provisionUser(server: TomcatServerConfig, usersXmlPath: string): string
 /**
  * Ensures conf/tomcat-users.xml has a user with the manager-script role that this extension
  * can use to call the Manager text API (deploy/undeploy/reload a single context instantly,
- * without restarting the whole server - the same trick IntelliJ's Tomcat integration relies
- * on). Creates one with a random password if none exists yet. The password is kept in
- * VSCode's SecretStorage, never written to settings.json.
+ * without restarting the whole server (the same underlying Tomcat feature many IDEs' Tomcat
+ * integrations rely on). Creates one with a random password if none exists yet. The password
+ * is kept in VSCode's SecretStorage, never written to settings.json.
  */
 export async function ensureManagerUser(
   server: TomcatServerConfig,

@@ -15,7 +15,7 @@ type Logger = (message: string) => void;
  * compiles). Instead it just watches whatever gets written to that output folder by whatever
  * actually builds it - VSCode's own Java language server incrementally compiling as you save
  * .java files (and copying resource files alongside, the same way Eclipse/JDT always has), a
- * manual `mvn compile` in a terminal, IntelliJ, CI, anything - and copies any changed file
+ * manual `mvn compile` in a terminal, an IDE's own build, CI, anything - and copies any changed file
  * straight into WEB-INF/classes.
  *
  * Combined with Tomcat's `reloadable="true"` (the default for exploded deployments from this

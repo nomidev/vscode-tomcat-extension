@@ -74,7 +74,7 @@ export interface BuildInfo {
   projectRoot: string;
   /** Where compiled classes + processed resources land once *something* builds this project
    *  (VSCode's own Java language server as you save .java files, a manual `mvn compile` /
-   *  `gradle classes` in a terminal, IntelliJ, CI, etc.) - this extension never runs a build
+   *  `gradle classes` in a terminal, another IDE's build, CI, etc.) - this extension never runs a build
    *  itself, it only watches these folders and mirrors them into WEB-INF/classes live. Maven
    *  puts everything in one folder; Gradle splits classes and resources into two. */
   classesOutDirs: string[];

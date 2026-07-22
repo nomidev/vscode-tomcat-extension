@@ -7,8 +7,9 @@ export interface DeployedApp {
   sourcePath: string;
   type: 'war' | 'exploded';
   /** For exploded (typically Maven/Gradle) deployments: an additional source folder (e.g.
-   *  src/main/webapp) linked directly into docBase, so JSP/static file edits are picked up
-   *  instantly without rebuilding or restarting. */
+   *  src/main/webapp) whose files are mirrored (copied) into docBase on change, so JSP/static
+   *  file edits are picked up quickly without rebuilding or restarting. See sourceSync.ts for
+   *  why this copies rather than symlinks/junctions the source in. */
   sourceOverlayPath?: string;
   /** Extra <Context> attributes detected from the deployed app's own META-INF/context.xml
    *  (e.g. an explicit `path`, `override`, etc.), preserved so regenerating context.xml later

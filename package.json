@@ -1,9 +1,13 @@
 {
   "name": "vscode-tomcat",
   "displayName": "Tomcat for VSCode",
-  "description": "IntelliJ IDEA style Apache Tomcat integration for VSCode: register servers, deploy WAR/exploded apps, start/stop/debug, view console logs.",
-  "version": "0.9.1",
+  "description": "Local Apache Tomcat integration for VSCode: register servers, deploy WAR/exploded apps, start/stop/debug, live JSP/Java reload, and view console logs.",
+  "version": "0.10.0",
   "publisher": "local-dev",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/nomidev/vscode-tomcat-extension"
+  },
   "engines": {
     "vscode": "^1.85.0"
   },

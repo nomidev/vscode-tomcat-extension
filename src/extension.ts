@@ -557,7 +557,7 @@ export function activate(context: vscode.ExtensionContext) {
             (reloadable
               ? '자동 컨텍스트 리로드가 켜져 있어 클래스 변경 시 Tomcat 이 컨텍스트를 자동으로 다시 로드합니다.'
               : '자동 컨텍스트 리로드는 꺼져있어(reloadable=false) 메서드 본문 변경은 디버거 핫스왑으로, 필드/메서드/클래스 추가 같은 구조적 변경은 "Reload Context Now" 로 반영하세요.')
-          : ' IntelliJ 처럼 이후 재빌드 시에는 서버 재시작 없이 즉시 반영됩니다.')
+          : ' 이후 재빌드 시에는 서버 재시작 없이 즉시 반영됩니다.')
     );
   });
 
