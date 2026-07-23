@@ -27,6 +27,8 @@ type Logger = (message: string) => void;
  */
 export class SourceSyncWatcher {
   private handle: RecursiveWatchHandle | undefined;
+  private pending = new Set<string>();
+  private flushTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(private sourceDir: string, private targetDir: string, private log: Logger = () => {}) {}
 
@@ -43,36 +45,69 @@ export class SourceSyncWatcher {
       this.log(`[sync] initial copy error: ${err}`);
     }
 
-    this.handle = watchRecursive(this.sourceDir, relPath => this.handleChange(relPath), this.log);
+    this.handle = watchRecursive(this.sourceDir, relPath => this.queueChange(relPath), this.log);
     this.log(`[sync] watching: ${this.sourceDir}`);
   }
 
   stop(): void {
+    if (this.flushTimer) clearTimeout(this.flushTimer);
     this.handle?.close();
     this.handle = undefined;
   }
 
-  private handleChange(relPath: string): void {
+  /**
+   * Saving one file can fire several raw fs-watch events in quick succession (editors doing
+   * atomic writes, a single compile touching many .class files for inner classes/lambdas,
+   * duplicate events some platforms emit for one logical change, etc.). Logging each one
+   * individually made the output channel unreadably noisy for what's really one save action.
+   * Instead, changes are collected for a brief window and flushed together as one summary
+   * line - still fully synced, just quieter.
+   */
+  private queueChange(relPath: string): void {
     if (!relPath) return;
-    const src = path.join(this.sourceDir, relPath);
-    const dest = path.join(this.targetDir, relPath);
+    this.pending.add(relPath);
+    if (this.flushTimer) clearTimeout(this.flushTimer);
+    this.flushTimer = setTimeout(() => this.flushPending(), 250);
+  }
 
-    try {
-      if (fs.existsSync(src)) {
-        const stat = fs.statSync(src);
-        if (stat.isDirectory()) {
-          fs.mkdirSync(dest, { recursive: true });
-        } else {
-          fs.mkdirSync(path.dirname(dest), { recursive: true });
-          fs.copyFileSync(src, dest);
-          this.log(`[sync] copied ${relPath}`);
+  private flushPending(): void {
+    const relPaths = Array.from(this.pending);
+    this.pending.clear();
+    if (relPaths.length === 0) return;
+
+    let copied = 0;
+    let removed = 0;
+    const errors: string[] = [];
+
+    for (const relPath of relPaths) {
+      const src = path.join(this.sourceDir, relPath);
+      const dest = path.join(this.targetDir, relPath);
+      try {
+        if (fs.existsSync(src)) {
+          const stat = fs.statSync(src);
+          if (stat.isDirectory()) {
+            fs.mkdirSync(dest, { recursive: true });
+          } else {
+            fs.mkdirSync(path.dirname(dest), { recursive: true });
+            fs.copyFileSync(src, dest);
+            copied++;
+          }
+        } else if (fs.existsSync(dest)) {
+          fs.rmSync(dest, { recursive: true, force: true });
+          removed++;
         }
-      } else if (fs.existsSync(dest)) {
-        fs.rmSync(dest, { recursive: true, force: true });
-        this.log(`[sync] removed ${relPath}`);
+      } catch (err) {
+        errors.push(`${relPath}: ${err}`);
       }
-    } catch (err) {
-      this.log(`[sync] error syncing ${relPath}: ${err}`);
+    }
+
+    if (copied || removed) {
+      const summary = [copied && `${copied}개 복사`, removed && `${removed}개 삭제`].filter(Boolean).join(', ');
+      const sample = relPaths.slice(0, 3).join(', ') + (relPaths.length > 3 ? ` 외 ${relPaths.length - 3}개` : '');
+      this.log(`[sync] ${summary} - ${sample}`);
+    }
+    for (const err of errors) {
+      this.log(`[sync] error syncing ${err}`);
     }
   }
 }

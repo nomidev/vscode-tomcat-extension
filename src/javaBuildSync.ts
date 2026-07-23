@@ -29,6 +29,8 @@ type Logger = (message: string) => void;
  */
 export class JavaBuildSyncWatcher {
   private handles: RecursiveWatchHandle[] = [];
+  private pending = new Map<string, string>(); // relPath -> outDir it came from
+  private flushTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(
     private buildInfo: BuildInfo,
@@ -48,12 +50,13 @@ export class JavaBuildSyncWatcher {
 
     for (const dir of dirs) {
       this.syncAll(dir);
-      this.handles.push(watchRecursive(dir, relPath => this.handleChange(dir, relPath), this.log));
+      this.handles.push(watchRecursive(dir, relPath => this.queueChange(dir, relPath), this.log));
     }
     this.log(`[classes-sync] watching: ${dirs.join(', ')} -> ${this.classesTargetDir}`);
   }
 
   stop(): void {
+    if (this.flushTimer) clearTimeout(this.flushTimer);
     for (const h of this.handles) h.close();
     this.handles = [];
   }
@@ -85,27 +88,58 @@ export class JavaBuildSyncWatcher {
     }
   }
 
-  private handleChange(outDir: string, relPath: string): void {
+  /**
+   * A single compile can touch many .class files at once (inner classes, lambdas, generated
+   * helpers) and some platforms fire duplicate fs-watch events for one logical write - logging
+   * each individually flooded the output channel for what's really one save. Changes are
+   * batched for a brief window and flushed together as one summary line instead.
+   */
+  private queueChange(outDir: string, relPath: string): void {
     if (!relPath) return;
-    const src = path.join(outDir, relPath);
-    const dest = path.join(this.classesTargetDir, relPath);
+    this.pending.set(relPath, outDir);
+    if (this.flushTimer) clearTimeout(this.flushTimer);
+    this.flushTimer = setTimeout(() => this.flushPending(), 250);
+  }
 
-    try {
-      if (fs.existsSync(src)) {
-        const stat = fs.statSync(src);
-        if (stat.isDirectory()) {
-          fs.mkdirSync(dest, { recursive: true });
-        } else {
-          fs.mkdirSync(path.dirname(dest), { recursive: true });
-          fs.copyFileSync(src, dest);
-          this.log(`[classes-sync] copied ${relPath}`);
+  private flushPending(): void {
+    const entries = Array.from(this.pending.entries());
+    this.pending.clear();
+    if (entries.length === 0) return;
+
+    let copied = 0;
+    let removed = 0;
+    const errors: string[] = [];
+
+    for (const [relPath, outDir] of entries) {
+      const src = path.join(outDir, relPath);
+      const dest = path.join(this.classesTargetDir, relPath);
+      try {
+        if (fs.existsSync(src)) {
+          const stat = fs.statSync(src);
+          if (stat.isDirectory()) {
+            fs.mkdirSync(dest, { recursive: true });
+          } else {
+            fs.mkdirSync(path.dirname(dest), { recursive: true });
+            fs.copyFileSync(src, dest);
+            copied++;
+          }
+        } else if (fs.existsSync(dest)) {
+          fs.rmSync(dest, { recursive: true, force: true });
+          removed++;
         }
-      } else if (fs.existsSync(dest)) {
-        fs.rmSync(dest, { recursive: true, force: true });
-        this.log(`[classes-sync] removed ${relPath}`);
+      } catch (err) {
+        errors.push(`${relPath}: ${err}`);
       }
-    } catch (err) {
-      this.log(`[classes-sync] error syncing ${relPath}: ${err}`);
+    }
+
+    if (copied || removed) {
+      const summary = [copied && `${copied}개 복사`, removed && `${removed}개 삭제`].filter(Boolean).join(', ');
+      const relPaths = entries.map(([p]) => p);
+      const sample = relPaths.slice(0, 3).join(', ') + (relPaths.length > 3 ? ` 외 ${relPaths.length - 3}개` : '');
+      this.log(`[classes-sync] ${summary} - ${sample}`);
+    }
+    for (const err of errors) {
+      this.log(`[classes-sync] error syncing ${err}`);
     }
   }
 }
