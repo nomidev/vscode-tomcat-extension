@@ -26,7 +26,7 @@ export function activate(context: vscode.ExtensionContext) {
   });
   context.subscriptions.push(explorerTreeView);
 
-  // --- Hot-swap failure notifications -------------------------------------------------
+  // --- Hot-swap failure notifications & auto-fallback ---------------------------------
   // The Java debugger ("Debugger for Java") does its own Hot Code Replace when you save a
   // .java file while attached, entirely outside this extension's control. Its exact custom
   // Debug Adapter Protocol event schema for reporting hot-swap failures isn't something we
@@ -34,9 +34,17 @@ export function activate(context: vscode.ExtensionContext) {
   // debug session we recognize as one we started (name matches "Attach to <server>") gets
   // logged to that server's output channel for visibility, and anything that looks like a
   // hot-swap-related failure (event name or body mentioning both "hotcodereplace"/"hotswap"
-  // and "error"/"fail") triggers a warning toast with a concrete next step - since a generic
-  // Java-debugger failure message wouldn't know "Reload Context Now" exists.
+  // and "error"/"fail") triggers a fallback.
+  //
+  // JDWP hot-swap is fundamentally unreliable on large/complex projects (heavy class
+  // hierarchies, lots of proxying, etc.) - that's a JVM-level limitation, not specific to
+  // this extension. So rather than just notifying and leaving it to the person to manually
+  // click "Reload Context Now" every time it happens, `tomcat.autoReloadOnHotSwapFailure`
+  // (on by default) automatically calls it for every live-reload-enabled app on that server:
+  // when hot-swap works, it's the fast silent path; when it doesn't, changes still always
+  // end up reflected without needing to notice the failure and intervene by hand.
   const debugSessionServers = new Map<string, TomcatServerConfig>();
+  const hotSwapFallbackTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   context.subscriptions.push(
     vscode.debug.onDidStartDebugSession(session => {
@@ -65,12 +73,44 @@ export function activate(context: vscode.ExtensionContext) {
       const bodyText = JSON.stringify(e.body ?? {}).toLowerCase();
       const mentionsHotSwap = eventName.includes('hotcodereplace') || eventName.includes('hotswap');
       const mentionsFailure = eventName.includes('error') || /error|fail/.test(bodyText);
+      if (!mentionsHotSwap || !mentionsFailure) return;
 
-      if (mentionsHotSwap && mentionsFailure) {
+      const autoReload = vscode.workspace
+        .getConfiguration('tomcat')
+        .get<boolean>('autoReloadOnHotSwapFailure', true);
+
+      if (!autoReload) {
         vscode.window.showWarningMessage(
           `"${server.name}" 에서 핫스왑(코드 교체)이 실패한 것 같습니다. 필드/메서드/클래스 추가 같은 구조적 변경이라면 정상적인 제약이니, 배포된 앱을 우클릭해 "Reload Context Now" 로 반영해보세요.`
         );
+        return;
       }
+
+      // Debounce per server: a single failed hot-swap attempt can emit more than one custom
+      // event in quick succession, and we only want to reload once per actual save, not once
+      // per event.
+      const existingTimer = hotSwapFallbackTimers.get(server.id);
+      if (existingTimer) clearTimeout(existingTimer);
+      hotSwapFallbackTimers.set(
+        server.id,
+        setTimeout(async () => {
+          hotSwapFallbackTimers.delete(server.id);
+          const current = manager.getServer(server.id);
+          if (!current) return;
+          const liveApps = current.deployedApps.filter(a => a.type === 'exploded' && a.sourceOverlayPath);
+          if (liveApps.length === 0) return;
+
+          channel?.appendLine(
+            `[debug] hot-swap 실패로 보여 자동으로 컨텍스트를 리로드합니다 (${liveApps.length}개 앱).`
+          );
+          for (const app of liveApps) {
+            await ensureContextReloaded(current, app.contextPath, { quiet: true });
+          }
+          vscode.window.showInformationMessage(
+            `"${server.name}": 핫스왑이 실패한 것 같아 자동으로 컨텍스트를 리로드해 변경사항을 반영했습니다.`
+          );
+        }, 500)
+      );
     })
   );
 

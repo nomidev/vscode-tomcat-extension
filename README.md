@@ -63,9 +63,11 @@ VSCode에서 로컬 Apache Tomcat 서버를 등록·배포·실행/디버그하�
 - 인증 실패(401) 시 서버 우클릭 → **Reset Manager Credentials...** 로 계정을 새로 만들 수 있고, "Reload Context Now" 실행 중 401이 뜨면 같은 동작을 바로 제안합니다.
 - 응답 대기 시간은 기본 45초이며 `tomcat.managerRequestTimeoutSeconds` 로 조정 가능합니다(빈이 많은 큰 애플리케이션은 리로드 자체가 오래 걸릴 수 있음).
 
-## 핫스왑 실패 알림
+## 핫스왑 실패 시 자동 리로드
 
-디버그 모드에서 저장 시 VSCode Java 디버거가 자체적으로 핫스왑을 시도합니다. 실패한 것으로 보이면(구조적 변경일 때 흔함) 알림으로 안내하고 "Reload Context Now" 를 제안합니다. Java 디버거의 정확한 내부 이벤트 스펙까지는 확정할 수 없어 패턴 매칭 기반 best-effort 감지이며, 원본 이벤트는 출력 채널에도 기록됩니다.
+디버그 모드에서 저장 시 VSCode Java 디버거가 자체적으로 핫스왑을 시도합니다. JDWP 기반 핫스왑은 대형·복잡한 프로젝트일수록 불안정해지는 JVM 자체의 알려진 한계라, 실패한 것으로 보이면(구조적 변경일 때 흔함) **자동으로 그 서버의 라이브 리로드 켜진 앱들에 "Reload Context Now" 를 실행**합니다(`tomcat.autoReloadOnHotSwapFailure`, 기본 켜짐). 핫스왑이 될 때는 빠르고 조용하게, 안 될 때는 자동으로 확실한 방법으로 넘어가는 구조라 매번 수동으로 알아채고 버튼을 누를 필요가 없습니다. 꺼두면 예전처럼 알림만 뜨고 직접 눌러야 합니다.
+
+Java 디버거의 정확한 내부 이벤트 스펙까지는 확정할 수 없어 패턴 매칭 기반 best-effort 감지이며, 원본 이벤트는 출력 채널에도 기록됩니다.
 
 ## 서버별 설정
 
@@ -89,6 +91,7 @@ VSCode에서 로컬 Apache Tomcat 서버를 등록·배포·실행/디버그하�
 | `mavenCommand` / `gradleCommand` | `mvn` / `gradle` | 빌드에 사용할 명령(래퍼 자동 감지) |
 | `excludeDefaultWebapps` | `true` | 기본 번들 웹앱 자동 배포 제외 여부 |
 | `managerRequestTimeoutSeconds` | `45` | Manager API 요청 타임아웃(초) |
+| `autoReloadOnHotSwapFailure` | `true` | 핫스왑 실패 시 자동으로 Reload Context Now 실행 여부 |
 
 ## 요구 사항
 
