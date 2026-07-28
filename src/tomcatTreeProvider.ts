@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { ServerManager } from './serverManager';
-import { TomcatServerConfig, DeployedApp, ServerStatus } from './model';
+import { TomcatServerConfig, DeployedApp, ServerStatus, AppStatus } from './model';
 
 function statusLabel(status: ServerStatus): string {
   switch (status) {
@@ -16,6 +16,19 @@ function isLive(status: ServerStatus): boolean {
   return status === 'running' || status === 'debugging';
 }
 
+function appStatusLabel(status: AppStatus): string {
+  switch (status) {
+    case 'running': return '● 실행 중';
+    case 'deploying': return '◐ 배포 중...';
+    case 'failed': return '✕ 배포 실패';
+    default: return '○ 중지됨';
+  }
+}
+
+function isAppLive(status: AppStatus): boolean {
+  return status === 'running';
+}
+
 export class ServerTreeItem extends vscode.TreeItem {
   constructor(public readonly server: TomcatServerConfig, public readonly status: ServerStatus) {
     super(server.name, vscode.TreeItemCollapsibleState.Expanded);
@@ -27,24 +40,34 @@ export class ServerTreeItem extends vscode.TreeItem {
 }
 
 export class AppTreeItem extends vscode.TreeItem {
-  constructor(public readonly server: TomcatServerConfig, public readonly app: DeployedApp, status: ServerStatus) {
+  constructor(public readonly server: TomcatServerConfig, public readonly app: DeployedApp, appStatus: AppStatus) {
     super(app.contextPath || '/', vscode.TreeItemCollapsibleState.None);
-    const live = isLive(status);
+    const live = isAppLive(appStatus);
     const overlay = app.sourceOverlayPath ? ` · live sync · reload:${app.reloadable ? 'auto' : 'manual'}` : '';
-    const liveMark = live ? '● ' : '○ ';
-    this.description = liveMark + (app.type === 'war' ? 'WAR' : 'exploded') + overlay;
+    this.description = `${appStatusLabel(appStatus)} · ${app.type === 'war' ? 'WAR' : 'exploded'}${overlay}`;
     this.contextValue = `tomcatApp-${app.type}`;
     this.iconPath = new vscode.ThemeIcon(
-      app.type === 'war' ? 'file-zip' : 'folder',
-      live ? new vscode.ThemeColor('testing.iconPassed') : undefined
+      appIconForStatus(app.type, appStatus),
+      live ? new vscode.ThemeColor('testing.iconPassed') : appStatus === 'failed' ? new vscode.ThemeColor('testing.iconFailed') : undefined
     );
-    const liveNote = live
-      ? '서버가 실행 중이므로 이 앱도 서비스되고 있습니다.'
-      : '서버가 중지되어 있어 이 앱은 현재 서비스되고 있지 않습니다. 서버를 시작하면 반영됩니다.';
+    const liveNote =
+      appStatus === 'running'
+        ? '이 앱은 정상적으로 배포되어 서비스되고 있습니다.'
+        : appStatus === 'deploying'
+        ? '서버가 이 앱을 배포하는 중입니다. 앱이 크거나 초기화 로직이 무거우면 서버 자체는 떠도 이 앱만 잠시 더 걸릴 수 있습니다.'
+        : appStatus === 'failed'
+        ? '이 앱은 배포/기동 중 오류가 발생해 서비스되지 않고 있습니다. Output 채널의 로그를 확인하세요.'
+        : '서버가 중지되어 있어 이 앱은 현재 서비스되고 있지 않습니다. 서버를 시작하면 반영됩니다.';
     this.tooltip = app.sourceOverlayPath
       ? `${app.sourcePath}\n${liveNote}\nLive source sync from: ${app.sourceOverlayPath}\nAuto context reload: ${app.reloadable ? 'on' : 'off (debugger hot-swap + manual Reload Context Now)'}`
       : `${app.sourcePath}\n${liveNote}`;
   }
+}
+
+function appIconForStatus(type: 'war' | 'exploded', status: AppStatus): string {
+  if (status === 'deploying') return 'sync~spin';
+  if (status === 'failed') return 'error';
+  return type === 'war' ? 'file-zip' : 'folder';
 }
 
 function iconForStatus(status: ServerStatus): string {
@@ -89,8 +112,9 @@ export class TomcatTreeProvider implements vscode.TreeDataProvider<Node> {
       );
     }
     if (element instanceof ServerTreeItem) {
-      const status = this.manager.getStatus(element.server.id);
-      return element.server.deployedApps.map(app => new AppTreeItem(element.server, app, status));
+      return element.server.deployedApps.map(
+        app => new AppTreeItem(element.server, app, this.manager.getAppStatus(element.server.id, app.contextPath))
+      );
     }
     return [];
   }

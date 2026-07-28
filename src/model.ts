@@ -1,5 +1,10 @@
 export type ServerStatus = 'stopped' | 'starting' | 'running' | 'debugging' | 'stopping';
 
+/** Per-app deployment status, tracked independently of the server's own status. A server can
+ *  be fully 'running' while one of its apps is still 'deploying' (large app, slow context init)
+ *  or ended up 'failed' (e.g. a listener threw during startup) while its siblings came up fine. */
+export type AppStatus = 'stopped' | 'deploying' | 'running' | 'failed';
+
 export interface DeployedApp {
   /** e.g. "/myapp" or "" for ROOT */
   contextPath: string;

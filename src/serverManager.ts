@@ -7,6 +7,7 @@ import {
   TomcatServerConfig,
   DeployedApp,
   ServerStatus,
+  AppStatus,
   DEFAULT_HTTP_PORT,
   DEFAULT_DEBUG_PORT
 } from './model';
@@ -24,6 +25,10 @@ interface RunningInfo {
   proc: ChildProcessWithoutNullStreams;
   status: ServerStatus;
   outputChannel: vscode.OutputChannel;
+  /** key: app contextPath (e.g. "/myapp", "/" for ROOT) - per-app deployment status, tracked
+   *  separately from the server's own `status` so the tree can show each app's real state
+   *  instead of just mirroring the server. */
+  appStatus: Map<string, AppStatus>;
 }
 
 function escapeRegex(s: string): string {
@@ -125,6 +130,13 @@ export class ServerManager {
 
   getStatus(id: string): ServerStatus {
     return this.running.get(id)?.status ?? 'stopped';
+  }
+
+  /** Per-app status. Falls back to 'stopped' whenever the server itself has no running entry
+   *  (not started yet, or already stopped/exited) or the app was deployed after the server
+   *  process launched and hasn't been through a start() cycle's tracking yet. */
+  getAppStatus(id: string, contextPath: string): AppStatus {
+    return this.running.get(id)?.appStatus.get(contextPath) ?? 'stopped';
   }
 
   // ---------- server registration ----------
@@ -567,9 +579,45 @@ export class ServerManager {
       shell: process.platform === 'win32'
     });
 
-    const info: RunningInfo = { proc, status: 'starting', outputChannel };
+    const info: RunningInfo = { proc, status: 'starting', outputChannel, appStatus: new Map() };
+    for (const app of server.deployedApps) {
+      info.appStatus.set(app.contextPath, 'deploying');
+    }
     this.running.set(id, info);
     this._onDidChange.fire();
+
+    const setAppStatus = (contextPath: string, status: AppStatus) => {
+      const current = info.appStatus.get(contextPath);
+      if (current === status) return;
+      // Once an app is confirmed running or failed, a later stray match (e.g. an unrelated
+      // "[]" bracket) shouldn't bounce it back to "deploying".
+      if ((current === 'running' || current === 'failed') && status === 'deploying') return;
+      info.appStatus.set(contextPath, status);
+      this._onDidChange.fire();
+    };
+
+    // Scans one chunk of Tomcat log output for per-app deploy start/finish/failure lines and
+    // updates that app's status accordingly. Line-based (rather than matching the raw chunk)
+    // so an unrelated SEVERE line elsewhere in the same chunk can't be misattributed to an app
+    // whose "has finished" line happens to also be in that chunk.
+    const checkAppDeployLines = (text: string) => {
+      const matchers = this.computeAppDeployMatchers(server);
+      for (const line of text.split(/\r?\n/)) {
+        for (const m of matchers) {
+          if (!line.includes(m.deployPathNeedle)) continue;
+          if (/SEVERE|Error deploying/i.test(line)) {
+            setAppStatus(m.contextPath, 'failed');
+          } else if (/has finished/i.test(line)) {
+            setAppStatus(m.contextPath, 'running');
+          }
+        }
+        const contextFailMatch = /Context \[([^\]]*)\] startup failed due to previous errors/.exec(line);
+        if (contextFailMatch) {
+          const m = matchers.find(x => x.contextBracketNeedle === contextFailMatch[1]);
+          if (m) setAppStatus(m.contextPath, 'failed');
+        }
+      }
+    };
 
     let debuggerAttached = false;
     const attachOnce = () => {
@@ -599,6 +647,41 @@ export class ServerManager {
     const STARTUP_MARKER = /Server startup in|INFO.*Starting ProtocolHandler/;
     const STARTUP_COMPLETE_MARKER = /Server startup in/;
 
+    // Fatal problems that mean Tomcat never actually came up, as opposed to routine SEVERE/WARN
+    // noise that can legitimately show up once the server's already running. Only checked while
+    // status is still 'starting', so errors logged later (e.g. from a deployed app at runtime)
+    // never trigger this.
+    const STARTUP_ERROR_MARKER =
+      /Failed to start component|LifecycleException|A child container failed during start|Address already in use|Could not start Tomcat|Error starting static Resources|BindException/i;
+
+    // Guards against double-handling: once we've decided the startup failed, the 'exit'
+    // handler and the 20s safety-net timeout below must not resurrect the server as
+    // "running" or show a second, contradictory message.
+    let startupFailed = false;
+    const failStartup = (reason: string) => {
+      if (startupFailed || info.status !== 'starting') return;
+      startupFailed = true;
+      info.status = 'stopped';
+      for (const [contextPath, appSt] of info.appStatus) {
+        if (appSt === 'deploying') info.appStatus.set(contextPath, 'failed');
+      }
+      outputChannel.appendLine(`\n[Tomcat] 시작 중 오류가 감지되어 서버 실행을 취소합니다: ${reason}`);
+      vscode.window.showErrorMessage(`${server.name} 시작 실패 (기동 중 오류 감지로 취소됨): ${reason}`);
+      this.running.delete(id);
+      this.stopAllSyncForServer(id);
+      this._onDidChange.fire();
+      // Kill whatever came up so a half-started JVM doesn't linger as an orphan process.
+      try {
+        if (process.platform === 'win32') {
+          spawn('taskkill', ['/pid', String(proc.pid), '/T', '/F']);
+        } else if (proc.pid) {
+          process.kill(-proc.pid, 'SIGKILL');
+        }
+      } catch {
+        // process may already be gone
+      }
+    };
+
     proc.stdout.on('data', (d: Buffer) => {
       const text = d.toString();
       outputChannel.append(text);
@@ -611,15 +694,40 @@ export class ServerManager {
       }
       if (STARTUP_COMPLETE_MARKER.test(recentOutput)) {
         notifyStartedOnce(false);
+        // Fallback: deployment normally finishes (with its own explicit log line) well before
+        // this overall banner, but if an app's "has finished"/error line didn't match for
+        // whatever reason (log wording differences), don't leave it stuck on "deploying"
+        // forever once we know the server itself came up fine.
+        for (const m of this.computeAppDeployMatchers(server)) {
+          if (info.appStatus.get(m.contextPath) === 'deploying') {
+            setAppStatus(m.contextPath, 'running');
+          }
+        }
+      }
+      checkAppDeployLines(text);
+      if (info.status === 'starting') {
+        const match = STARTUP_ERROR_MARKER.exec(text);
+        if (match) {
+          failStartup(match[0]);
+        }
       }
     });
 
     proc.stderr.on('data', (d: Buffer) => {
-      outputChannel.append(d.toString());
+      const text = d.toString();
+      outputChannel.append(text);
+      checkAppDeployLines(text);
+      if (info.status === 'starting') {
+        const match = STARTUP_ERROR_MARKER.exec(text);
+        if (match) {
+          failStartup(match[0]);
+        }
+      }
     });
 
     proc.on('exit', (code) => {
       outputChannel.appendLine(`\n[Tomcat] Process exited with code ${code}`);
+      if (startupFailed) return;
       this.running.delete(id);
       this.stopAllSyncForServer(id);
       this._onDidChange.fire();
@@ -627,6 +735,7 @@ export class ServerManager {
 
     proc.on('error', (err) => {
       outputChannel.appendLine(`\n[Tomcat] Failed to start: ${err.message}`);
+      if (startupFailed) return;
       vscode.window.showErrorMessage(`Tomcat 시작 실패: ${err.message}`);
       this.running.delete(id);
       this.stopAllSyncForServer(id);
@@ -639,13 +748,46 @@ export class ServerManager {
     // bug: the debugger would simply never attach if the banner regex didn't match, with no
     // error shown, silently leaving `debuggerAttached` false forever.
     setTimeout(() => {
+      if (startupFailed) return;
       if (info.status === 'starting') {
         info.status = debug ? 'debugging' : 'running';
         this._onDidChange.fire();
       }
+      for (const m of this.computeAppDeployMatchers(server)) {
+        if (info.appStatus.get(m.contextPath) === 'deploying') {
+          setAppStatus(m.contextPath, 'running');
+        }
+      }
       attachOnce();
       notifyStartedOnce(true);
     }, 20000);
+  }
+
+  /** Precomputes, for each of the server's currently deployed apps, the on-disk deployment
+   *  identifier Tomcat's HostConfig logs while deploying it (the WAR file path, or the context
+   *  descriptor XML path for exploded apps under conf/Catalina/<host>/), plus the
+   *  `[contextPath]` bracket Tomcat uses in its own per-context startup-failure log line - see
+   *  deployWar()/deployExploded() for where these same paths get written. */
+  private computeAppDeployMatchers(
+    server: TomcatServerConfig
+  ): { contextPath: string; deployPathNeedle: string; contextBracketNeedle: string }[] {
+    return server.deployedApps.map(app => {
+      let deployPathNeedle: string;
+      if (app.type === 'war') {
+        deployPathNeedle = app.sourcePath;
+      } else {
+        const appName = app.contextPath === '/' ? 'ROOT' : app.contextPath.replace(/^\/+/, '');
+        const xmlName = appName === 'ROOT' ? 'ROOT.xml' : `${appName}.xml`;
+        deployPathNeedle = path.join(server.homePath, 'conf', 'Catalina', 'localhost', xmlName);
+      }
+      return {
+        contextPath: app.contextPath,
+        deployPathNeedle,
+        // Tomcat's internal context path for ROOT is "" (logged as "Context [] startup
+        // failed..."), while our model stores ROOT's contextPath as "/".
+        contextBracketNeedle: app.contextPath === '/' ? '' : app.contextPath
+      };
+    });
   }
 
   private async attachDebugger(server: TomcatServerConfig) {
@@ -927,6 +1069,18 @@ export class ServerManager {
     server.deployedApps = server.deployedApps.filter(a => a.contextPath !== app.contextPath);
     server.deployedApps.push(app);
     await this.save();
+
+    // If the server's already running, this is a deploy-while-live (Tomcat's own autoDeploy
+    // background scan will pick up the new WAR/context descriptor within a few seconds) - seed
+    // its status as 'deploying' so the tree doesn't show it as freshly running before it
+    // actually is. The 'starting' server's stdout listener (see start()) recomputes its app
+    // matchers from server.deployedApps on every log chunk, so it'll pick this app's own
+    // deploy-finished/error line up automatically once Tomcat logs it.
+    const info = this.running.get(server.id);
+    if (info) {
+      info.appStatus.set(app.contextPath, 'deploying');
+      this._onDidChange.fire();
+    }
   }
 
   async undeploy(id: string, contextPath: string): Promise<void> {
@@ -955,6 +1109,12 @@ export class ServerManager {
 
     server.deployedApps = server.deployedApps.filter(a => a.contextPath !== contextPath);
     await this.save();
+
+    const info = this.running.get(id);
+    if (info) {
+      info.appStatus.delete(contextPath);
+      this._onDidChange.fire();
+    }
   }
 
   getAppUrl(server: TomcatServerConfig, app: DeployedApp): string {
