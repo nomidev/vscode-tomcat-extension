@@ -692,19 +692,10 @@ export class ServerManager {
         this._onDidChange.fire();
         attachOnce();
       }
+      checkAppDeployLines(text);
       if (STARTUP_COMPLETE_MARKER.test(recentOutput)) {
         notifyStartedOnce(false);
-        // Fallback: deployment normally finishes (with its own explicit log line) well before
-        // this overall banner, but if an app's "has finished"/error line didn't match for
-        // whatever reason (log wording differences), don't leave it stuck on "deploying"
-        // forever once we know the server itself came up fine.
-        for (const m of this.computeAppDeployMatchers(server)) {
-          if (info.appStatus.get(m.contextPath) === 'deploying') {
-            setAppStatus(m.contextPath, 'running');
-          }
-        }
       }
-      checkAppDeployLines(text);
       if (info.status === 'starting') {
         const match = STARTUP_ERROR_MARKER.exec(text);
         if (match) {
@@ -752,11 +743,6 @@ export class ServerManager {
       if (info.status === 'starting') {
         info.status = debug ? 'debugging' : 'running';
         this._onDidChange.fire();
-      }
-      for (const m of this.computeAppDeployMatchers(server)) {
-        if (info.appStatus.get(m.contextPath) === 'deploying') {
-          setAppStatus(m.contextPath, 'running');
-        }
       }
       attachOnce();
       notifyStartedOnce(true);

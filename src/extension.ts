@@ -5,7 +5,8 @@ import { ServerManager } from './serverManager';
 import { TomcatTreeProvider, ServerTreeItem, AppTreeItem } from './tomcatTreeProvider';
 import { findMetaInfContext, parseMetaInfContext } from './contextXml';
 import { LOG_LEVELS, TomcatServerConfig } from './model';
-import { detectWebappSource } from './sourceOverlay';
+import { detectWebappSource, isExplodedWebappFolder, resolveProjectRoot, detectBuildInfo } from './sourceOverlay';
+import { buildExplodedWebapp } from './explodedBuild';
 import { hasManagerApp, ensureManagerUser, resetManagerUser, reloadContext } from './tomcatManager';
 
 let activeManager: ServerManager | undefined;
@@ -473,10 +474,64 @@ export function activate(context: vscode.ExtensionContext) {
       canSelectFiles: false,
       canSelectFolders: true,
       canSelectMany: false,
-      openLabel: '배포할 웹앱 폴더 선택 (WEB-INF 포함 폴더)'
+      openLabel: '배포할 웹앱 폴더 선택 (WEB-INF 포함 폴더, 또는 아직 빌드 전인 Maven/Gradle 프로젝트 폴더)'
     });
     if (!uris || uris.length === 0) return;
-    const folderPath = uris[0].fsPath;
+    let folderPath = uris[0].fsPath;
+
+    // If the selected folder isn't already a built exploded webapp (no WEB-INF), see if it's
+    // - or sits inside - a Maven/Gradle project we can build for them instead of just failing.
+    // Lets people point this command straight at their project folder before ever running a
+    // build themselves, instead of requiring an already-built target/<name> folder to exist.
+    let builtFromProjectRoot: string | undefined;
+    if (!isExplodedWebappFolder(folderPath)) {
+      const projectRoot = resolveProjectRoot(folderPath);
+      const buildInfo = projectRoot ? detectBuildInfo(projectRoot) : undefined;
+      if (!buildInfo || !projectRoot) {
+        vscode.window.showErrorMessage(
+          `선택한 폴더는 아직 빌드되지 않은 것 같고(WEB-INF 없음), Maven/Gradle 프로젝트도 찾지 못했습니다. ` +
+            `이미 빌드된 exploded 폴더(WEB-INF 포함)를 선택하거나, 프로젝트를 먼저 빌드한 뒤 다시 시도해주세요.`
+        );
+        return;
+      }
+
+      const toolLabel = buildInfo.tool === 'maven' ? 'Maven' : 'Gradle';
+      const proceed = await vscode.window.showInformationMessage(
+        `"${folderPath}" 는 아직 빌드된 웹앱이 아닙니다. 감지된 ${toolLabel} 프로젝트(${projectRoot})를 지금 빌드해서 자동으로 exploded 배포로 등록할까요?`,
+        { modal: true },
+        '빌드 후 배포'
+      );
+      if (proceed !== '빌드 후 배포') return;
+
+      const buildChannel = vscode.window.createOutputChannel(`Tomcat: Build (${path.basename(projectRoot)})`);
+      buildChannel.clear();
+      buildChannel.show(true);
+
+      const result = await vscode.window.withProgress(
+        {
+          location: vscode.ProgressLocation.Notification,
+          title: `${toolLabel} 빌드로 exploded 웹앱 생성 중...`,
+          cancellable: false
+        },
+        () =>
+          buildExplodedWebapp(buildInfo, {
+            mavenCommand: manager.getMavenCommand(),
+            gradleCommand: manager.getGradleCommand(),
+            javaHome: item.server.javaHome,
+            log: msg => buildChannel.appendLine(msg)
+          })
+      );
+
+      if (!result.ok || !result.explodedPath) {
+        vscode.window.showErrorMessage(
+          `자동 빌드에 실패했습니다${result.message ? `: ${result.message}` : ''}. 자세한 내용은 "${buildChannel.name}" 출력 채널을 확인하세요.`
+        );
+        return;
+      }
+
+      folderPath = result.explodedPath;
+      builtFromProjectRoot = projectRoot;
+    }
 
     // Detect META-INF/context.xml inside the webapp and offer to reuse it.
     const metaInfPath = findMetaInfContext(folderPath);
@@ -509,10 +564,13 @@ export function activate(context: vscode.ExtensionContext) {
       useDetected = pick.value;
     }
 
+    // When we had to auto-build the app, prefer the project root's own folder name over the
+    // build output folder's name (e.g. Maven's finalName, often something like
+    // "myapp-1.0-SNAPSHOT") as the default context path - it reads much more naturally.
     const defaultName =
       (useDetected && detected?.path !== undefined
         ? detected.path.replace(/^\/+/, '') || 'ROOT'
-        : undefined) ?? path.basename(folderPath);
+        : undefined) ?? path.basename(builtFromProjectRoot ?? folderPath);
 
     const contextPath = await vscode.window.showInputBox({
       prompt: '컨텍스트 경로 (ROOT 로 배포하려면 "ROOT" 입력)',
@@ -588,6 +646,7 @@ export function activate(context: vscode.ExtensionContext) {
     const running = manager.getStatus(item.server.id) !== 'stopped';
     vscode.window.showInformationMessage(
       `"${contextPath}" 가 exploded 배포로 등록되었습니다${useDetected ? ' (META-INF/context.xml 설정 적용됨)' : ''}` +
+        `${builtFromProjectRoot ? ` (자동 빌드된 폴더 사용: ${folderPath})` : ''}` +
         `${sourceOverlayPath ? ` (라이브 소스 오버레이: ${sourceOverlayPath})` : ''}. ` +
         (running
           ? 'Tomcat 이 자동으로(보통 수 초 내) 감지해 배포합니다. 전체 서버 재시작은 필요 없습니다.'

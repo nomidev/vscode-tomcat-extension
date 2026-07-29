@@ -24,6 +24,7 @@ VSCode에서 로컬 Apache Tomcat 서버를 등록·배포·실행/디버그하�
 - **Deploy WAR...**: `.war` 파일을 `webapps/` 로 복사합니다.
 - **Deploy Exploded Folder...**: 빌드 출력 폴더(`WEB-INF` 포함)를 가리키는 컨텍스트 XML을 생성합니다.
   - 폴더 안에 `META-INF/context.xml`이 있으면 자동 감지해 `path`/`Resource`/`Environment` 등을 그대로 쓸지 물어봅니다.
+  - 아직 안 빌드된(WEB-INF 없는) Maven/Gradle 프로젝트 폴더를 선택해도 됩니다 — 감지된 프로젝트를 그 자리에서 빌드(Maven: `war:exploded`, Gradle: `war` 빌드 후 압축 해제)해서 자동으로 배포합니다.
 - **Undeploy**: 배포 항목과 관련 파일을 정리합니다.
 - **전체 재시작 없는 반영**: 배포·Undeploy는 Tomcat 자체의 `autoDeploy` 가 처리합니다 — 서버가 실행 중이면 보통 수 초~15초 내로 그 앱만 배포/제거되고, 다른 앱이나 서버 프로세스 자체에는 영향 없습니다.
 - **기본 웹앱 제외** (기본 켜짐, `tomcat.excludeDefaultWebapps`): `ROOT`/`docs`/`examples`/`host-manager` 를 자동 배포에서 제외합니다. `manager` 는 "Reload Context Now" 에 필요해 제외 대상에서 빠집니다.

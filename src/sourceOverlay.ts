@@ -1,6 +1,12 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
+/** True if `folderPath` already looks like a deployable exploded webapp (has a WEB-INF
+ *  subfolder) as opposed to an unbuilt project root/source folder. */
+export function isExplodedWebappFolder(folderPath: string): boolean {
+  return fs.existsSync(path.join(folderPath, 'WEB-INF'));
+}
+
 /** Files that indicate a directory is a Maven or Gradle project root. */
 const BUILD_MARKERS = ['pom.xml', 'build.gradle', 'build.gradle.kts', 'settings.gradle', 'settings.gradle.kts'];
 
@@ -51,6 +57,12 @@ export function detectWebappSource(
   return undefined;
 }
 
+/** True if `folderPath` itself (not an ancestor) looks like a Maven or Gradle project root -
+ *  i.e. has one of BUILD_MARKERS directly inside it. */
+export function isProjectRoot(folderPath: string): boolean {
+  return BUILD_MARKERS.some(marker => fs.existsSync(path.join(folderPath, marker)));
+}
+
 /**
  * Walks up from a build-output folder to the nearest ancestor that looks like a Maven or
  * Gradle project root (i.e. contains one of BUILD_MARKERS). Used to locate `src/main/java`,
@@ -67,6 +79,14 @@ export function findProjectRoot(startPath: string): string | undefined {
     }
   }
   return undefined;
+}
+
+/** Resolves the nearest Maven/Gradle project root for `folderPath`: the folder itself if it's
+ *  a project root (e.g. the user picked the project's top-level folder directly, which hasn't
+ *  been built yet and so has no exploded webapp folder to pick instead), otherwise the nearest
+ *  ancestor that is one (e.g. they picked a nested source or build-output folder). */
+export function resolveProjectRoot(folderPath: string): string | undefined {
+  return isProjectRoot(folderPath) ? folderPath : findProjectRoot(folderPath);
 }
 
 export interface BuildInfo {
