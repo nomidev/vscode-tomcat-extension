@@ -596,28 +596,40 @@ export class ServerManager {
       this._onDidChange.fire();
     };
 
-    // Scans one chunk of Tomcat log output for per-app deploy start/finish/failure lines and
-    // updates that app's status accordingly. Line-based (rather than matching the raw chunk)
-    // so an unrelated SEVERE line elsewhere in the same chunk can't be misattributed to an app
-    // whose "has finished" line happens to also be in that chunk.
-    const checkAppDeployLines = (text: string) => {
-      const matchers = this.computeAppDeployMatchers(server);
-      for (const line of text.split(/\r?\n/)) {
-        for (const m of matchers) {
-          if (!line.includes(m.deployPathNeedle)) continue;
-          if (/SEVERE|Error deploying/i.test(line)) {
-            setAppStatus(m.contextPath, 'failed');
-          } else if (/has finished/i.test(line)) {
-            setAppStatus(m.contextPath, 'running');
+    // Scans Tomcat log output for per-app deploy start/finish/failure lines and updates that
+    // app's status accordingly. Line-based (rather than matching the raw chunk) so an unrelated
+    // SEVERE line elsewhere in the same chunk can't be misattributed to an app whose "has
+    // finished" line happens to also be in that chunk. Buffers any trailing partial line (no
+    // newline yet) across calls, since Node can split a single Catalina log line across two
+    // separate 'data' events - without this, a split "...has finished..." line would silently
+    // never match and leave that app stuck showing "deploying" forever. stdout and stderr each
+    // get their own checker (own buffer) via this factory so a partial line from one stream can
+    // never merge with a chunk from the other.
+    const makeDeployLineChecker = () => {
+      let buffer = '';
+      return (chunk: string) => {
+        const matchers = this.computeAppDeployMatchers(server);
+        const lines = (buffer + chunk).split(/\r?\n/);
+        buffer = lines.pop() ?? '';
+        for (const line of lines) {
+          for (const m of matchers) {
+            if (!line.includes(m.deployPathNeedle)) continue;
+            if (/SEVERE|Error deploying/i.test(line)) {
+              setAppStatus(m.contextPath, 'failed');
+            } else if (/has finished/i.test(line)) {
+              setAppStatus(m.contextPath, 'running');
+            }
+          }
+          const contextFailMatch = /Context \[([^\]]*)\] startup failed due to previous errors/.exec(line);
+          if (contextFailMatch) {
+            const m = matchers.find(x => x.contextBracketNeedle === contextFailMatch[1]);
+            if (m) setAppStatus(m.contextPath, 'failed');
           }
         }
-        const contextFailMatch = /Context \[([^\]]*)\] startup failed due to previous errors/.exec(line);
-        if (contextFailMatch) {
-          const m = matchers.find(x => x.contextBracketNeedle === contextFailMatch[1]);
-          if (m) setAppStatus(m.contextPath, 'failed');
-        }
-      }
+      };
     };
+    const checkAppDeployLinesStdout = makeDeployLineChecker();
+    const checkAppDeployLinesStderr = makeDeployLineChecker();
 
     let debuggerAttached = false;
     const attachOnce = () => {
@@ -692,9 +704,14 @@ export class ServerManager {
         this._onDidChange.fire();
         attachOnce();
       }
-      checkAppDeployLines(text);
+      checkAppDeployLinesStdout(text);
       if (STARTUP_COMPLETE_MARKER.test(recentOutput)) {
         notifyStartedOnce(false);
+        for (const m of this.computeAppDeployMatchers(server)) {
+          if (info.appStatus.get(m.contextPath) === 'deploying') {
+            setAppStatus(m.contextPath, 'running');
+          }
+        }
       }
       if (info.status === 'starting') {
         const match = STARTUP_ERROR_MARKER.exec(text);
@@ -707,7 +724,7 @@ export class ServerManager {
     proc.stderr.on('data', (d: Buffer) => {
       const text = d.toString();
       outputChannel.append(text);
-      checkAppDeployLines(text);
+      checkAppDeployLinesStderr(text);
       if (info.status === 'starting') {
         const match = STARTUP_ERROR_MARKER.exec(text);
         if (match) {
