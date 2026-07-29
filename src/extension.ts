@@ -6,7 +6,7 @@ import { TomcatTreeProvider, ServerTreeItem, AppTreeItem } from './tomcatTreePro
 import { findMetaInfContext, parseMetaInfContext } from './contextXml';
 import { LOG_LEVELS, TomcatServerConfig } from './model';
 import { detectWebappSource, isExplodedWebappFolder, resolveProjectRoot, detectBuildInfo } from './sourceOverlay';
-import { buildExplodedWebapp } from './explodedBuild';
+import { buildExplodedWebapp, findExistingExplodedOutput } from './explodedBuild';
 import { hasManagerApp, ensureManagerUser, resetManagerUser, reloadContext } from './tomcatManager';
 
 let activeManager: ServerManager | undefined;
@@ -496,41 +496,64 @@ export function activate(context: vscode.ExtensionContext) {
       }
 
       const toolLabel = buildInfo.tool === 'maven' ? 'Maven' : 'Gradle';
-      const proceed = await vscode.window.showInformationMessage(
-        `"${folderPath}" 는 아직 빌드된 웹앱이 아닙니다. 감지된 ${toolLabel} 프로젝트(${projectRoot})를 지금 빌드해서 자동으로 exploded 배포로 등록할까요?`,
-        { modal: true },
-        '빌드 후 배포'
-      );
-      if (proceed !== '빌드 후 배포') return;
 
-      const buildChannel = vscode.window.createOutputChannel(`Tomcat: Build (${path.basename(projectRoot)})`);
-      buildChannel.clear();
-      buildChannel.show(true);
-
-      const result = await vscode.window.withProgress(
-        {
-          location: vscode.ProgressLocation.Notification,
-          title: `${toolLabel} 빌드로 exploded 웹앱 생성 중...`,
-          cancellable: false
-        },
-        () =>
-          buildExplodedWebapp(buildInfo, {
-            mavenCommand: manager.getMavenCommand(),
-            gradleCommand: manager.getGradleCommand(),
-            javaHome: item.server.javaHome,
-            log: msg => buildChannel.appendLine(msg)
-          })
-      );
-
-      if (!result.ok || !result.explodedPath) {
-        vscode.window.showErrorMessage(
-          `자동 빌드에 실패했습니다${result.message ? `: ${result.message}` : ''}. 자세한 내용은 "${buildChannel.name}" 출력 채널을 확인하세요.`
+      // The user may have picked the project root of an app that's *already* built (a common
+      // habit, especially now that this command also accepts unbuilt project folders) rather
+      // than the build output folder itself - don't tell them it isn't built when it is.
+      const existing = findExistingExplodedOutput(buildInfo);
+      if (existing) {
+        const choice = await vscode.window.showQuickPick(
+          [
+            { label: '$(check) 기존 빌드 사용', description: existing, value: 'use' as const },
+            { label: '$(sync) 다시 빌드', description: `${toolLabel} 빌드를 새로 실행합니다`, value: 'rebuild' as const }
+          ],
+          { placeHolder: `이미 빌드된 폴더를 찾았습니다: ${existing}` }
         );
-        return;
+        if (!choice) return;
+        if (choice.value === 'use') {
+          folderPath = existing;
+          builtFromProjectRoot = projectRoot;
+        }
       }
 
-      folderPath = result.explodedPath;
-      builtFromProjectRoot = projectRoot;
+      // Either nothing existing was found, or the user asked to rebuild.
+      if (folderPath === uris[0].fsPath) {
+        const proceed = await vscode.window.showInformationMessage(
+          `"${folderPath}" 는 아직 빌드된 웹앱이 아닙니다. 감지된 ${toolLabel} 프로젝트(${projectRoot})를 지금 빌드해서 자동으로 exploded 배포로 등록할까요?`,
+          { modal: true },
+          '빌드 후 배포'
+        );
+        if (proceed !== '빌드 후 배포') return;
+
+        const buildChannel = vscode.window.createOutputChannel(`Tomcat: Build (${path.basename(projectRoot)})`);
+        buildChannel.clear();
+        buildChannel.show(true);
+
+        const result = await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: `${toolLabel} 빌드로 exploded 웹앱 생성 중...`,
+            cancellable: false
+          },
+          () =>
+            buildExplodedWebapp(buildInfo, {
+              mavenCommand: manager.getMavenCommand(),
+              gradleCommand: manager.getGradleCommand(),
+              javaHome: item.server.javaHome,
+              log: msg => buildChannel.appendLine(msg)
+            })
+        );
+
+        if (!result.ok || !result.explodedPath) {
+          vscode.window.showErrorMessage(
+            `자동 빌드에 실패했습니다${result.message ? `: ${result.message}` : ''}. 자세한 내용은 "${buildChannel.name}" 출력 채널을 확인하세요.`
+          );
+          return;
+        }
+
+        folderPath = result.explodedPath;
+        builtFromProjectRoot = projectRoot;
+      }
     }
 
     // Detect META-INF/context.xml inside the webapp and offer to reuse it.

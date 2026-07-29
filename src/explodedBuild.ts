@@ -73,11 +73,24 @@ function runShell(
 
 /** Recursively-shallow scan: finds the most-recently-modified immediate subfolder of `root`
  *  that looks like an exploded webapp (has a WEB-INF subfolder), skipping known non-webapp
- *  Maven output folders. Used after `war:exploded` instead of predicting Maven's exact
- *  `finalName` (customizable in pom.xml, so not safe to assume). */
-function findNewestExplodedDir(root: string): string | undefined {
+ *  Maven/Gradle output folders. Used both after running a fresh build (instead of predicting
+ *  Maven's exact `finalName`, customizable in pom.xml, so not safe to assume) and to detect a
+ *  build that already exists from a previous run (in or outside this extension). */
+export function findNewestExplodedDir(root: string): string | undefined {
   if (!fs.existsSync(root)) return undefined;
-  const skip = new Set(['classes', 'test-classes', 'generated-sources', 'maven-status', 'maven-archiver']);
+  const skip = new Set([
+    'classes',
+    'test-classes',
+    'generated-sources',
+    'maven-status',
+    'maven-archiver',
+    'libs',
+    'resources',
+    'tmp',
+    'reports',
+    'test-results',
+    'distributions'
+  ]);
   let best: { path: string; mtimeMs: number } | undefined;
   for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
     if (!entry.isDirectory() || skip.has(entry.name)) continue;
@@ -87,6 +100,21 @@ function findNewestExplodedDir(root: string): string | undefined {
     if (!best || mtimeMs > best.mtimeMs) best = { path: candidate, mtimeMs };
   }
   return best?.path;
+}
+
+/** Where a build for `buildInfo` would already have left an exploded webapp, if one has run
+ *  before (via this extension, another IDE, or the command line) - checked before offering to
+ *  kick off a fresh build, so an already-built app doesn't get mistaken for an unbuilt one just
+ *  because the user pointed this command at the project root instead of the build output
+ *  folder directly. Maven's `target/` is scanned directly since `war:exploded`/`package`
+ *  always land there; Gradle's plain `war` task only ever produces a `.war` file (not an
+ *  exploded folder) unless something has explicitly unpacked it before, so only this
+ *  extension's own past `build/tomcat-exploded/` output is considered "already built" there. */
+export function findExistingExplodedOutput(buildInfo: BuildInfo): string | undefined {
+  if (buildInfo.tool === 'maven') {
+    return findNewestExplodedDir(path.join(buildInfo.projectRoot, 'target'));
+  }
+  return findNewestExplodedDir(path.join(buildInfo.projectRoot, 'build', 'tomcat-exploded'));
 }
 
 function findNewestFile(dir: string, ext: string): string | undefined {
