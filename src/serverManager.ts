@@ -613,7 +613,11 @@ export class ServerManager {
         buffer = lines.pop() ?? '';
         for (const line of lines) {
           for (const m of matchers) {
-            if (!line.includes(m.deployPathNeedle)) continue;
+            // Tomcat always logs these identifiers inside square brackets, e.g.
+            // "[C:\...\lgcom.xml]" or "[/opt/tomcat/webapps/myapp.war]" - requiring the
+            // filename to be immediately followed by "]" keeps this from matching some
+            // unrelated line that merely mentions the filename in passing.
+            if (!line.includes(`${m.deployFileName}]`)) continue;
             if (/SEVERE|Error deploying/i.test(line)) {
               setAppStatus(m.contextPath, 'failed');
             } else if (/has finished/i.test(line)) {
@@ -767,31 +771,37 @@ export class ServerManager {
   }
 
   /** Precomputes, for each of the server's currently deployed apps, the on-disk deployment
-   *  identifier Tomcat's HostConfig logs while deploying it (the WAR file path, or the context
-   *  descriptor XML path for exploded apps under conf/Catalina/<host>/), plus the
-   *  `[contextPath]` bracket Tomcat uses in its own per-context startup-failure log line - see
-   *  deployWar()/deployExploded() for where these same paths get written. */
+   *  filename Tomcat's HostConfig logs while deploying it (the WAR filename, or the context
+   *  descriptor XML filename for exploded apps under conf/Catalina/<host>/) - matched against
+   *  just the filename rather than the full absolute path, since the JVM's own resolved
+   *  CATALINA_BASE can end up textually different from our stored server.homePath even when it
+   *  points at the exact same directory (a pre-existing system-wide CATALINA_HOME env var that
+   *  catalina.bat/sh prefers over what we pass, 8.3 short paths on Windows, etc.) - the
+   *  filename itself is something this extension chose and wrote to disk, so it can't drift.
+   *  Also returns the `[contextPath]` bracket Tomcat uses in its own per-context
+   *  startup-failure log line - see deployWar()/deployExploded() for where these same names
+   *  get written. */
   private computeAppDeployMatchers(
     server: TomcatServerConfig
-  ): { contextPath: string; deployPathNeedle: string; contextBracketNeedle: string }[] {
+  ): { contextPath: string; deployFileName: string; contextBracketNeedle: string }[] {
     return server.deployedApps.map(app => {
-      let deployPathNeedle: string;
-      if (app.type === 'war') {
-        deployPathNeedle = app.sourcePath;
-      } else {
-        const appName = app.contextPath === '/' ? 'ROOT' : app.contextPath.replace(/^\/+/, '');
-        const xmlName = appName === 'ROOT' ? 'ROOT.xml' : `${appName}.xml`;
-        deployPathNeedle = path.join(server.homePath, 'conf', 'Catalina', 'localhost', xmlName);
-      }
+      const deployFileName =
+        app.type === 'war'
+          ? path.basename(app.sourcePath)
+          : (() => {
+              const appName = app.contextPath === '/' ? 'ROOT' : app.contextPath.replace(/^\/+/, '');
+              return appName === 'ROOT' ? 'ROOT.xml' : `${appName}.xml`;
+            })();
       return {
         contextPath: app.contextPath,
-        deployPathNeedle,
+        deployFileName,
         // Tomcat's internal context path for ROOT is "" (logged as "Context [] startup
         // failed..."), while our model stores ROOT's contextPath as "/".
         contextBracketNeedle: app.contextPath === '/' ? '' : app.contextPath
       };
     });
   }
+
 
   private async attachDebugger(server: TomcatServerConfig) {
     const debugConfig: vscode.DebugConfiguration = {
