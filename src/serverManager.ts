@@ -518,6 +518,24 @@ export class ServerManager {
   }
 
   private async doStart(id: string, server: TomcatServerConfig, debug: boolean): Promise<void> {
+    // Covers the whole gap from "start clicked" to "first real Tomcat log line", not just the
+    // post-spawn JVM boot - a pre-start Maven/Gradle build (for apps with live source sync) can
+    // itself take just as long, and previously ran with no visible progress toast at all.
+    // reportPhase()/resolveBoot() are wired up as we go so the same single notification can
+    // update its message across phases and then disappear once real output starts.
+    let resolveBoot: () => void = () => {};
+    let reportPhase: (message: string) => void = () => {};
+    const bootDone = new Promise<void>(resolve => {
+      resolveBoot = resolve;
+    });
+    vscode.window.withProgress(
+      { location: vscode.ProgressLocation.Notification, title: `${server.name} 시작 중...`, cancellable: false },
+      progress => {
+        reportPhase = message => progress.report({ message });
+        return bootDone;
+      }
+    );
+
     const script = this.getCatalinaScript(server.homePath);
     if (process.platform !== 'win32') {
       try {
@@ -562,6 +580,7 @@ export class ServerManager {
     }
     if (presyncTasks.length > 0) {
       outputChannel.appendLine('[Tomcat] Syncing compiled classes/resources for Maven/Gradle app(s)...');
+      reportPhase('Maven/Gradle 빌드 및 소스 동기화 중...');
       try {
         await Promise.all(presyncTasks);
       } catch (err) {
@@ -611,33 +630,16 @@ export class ServerManager {
       shell: process.platform === 'win32'
     });
 
-    // Tomcat/the JVM print nothing at all until the JVM has booted and Catalina's own
-    // logging is initialized - normal, but can look like nothing is happening for several
-    // seconds, especially in debug mode where attaching the JDWP agent adds real startup
-    // overhead on top of the JVM's own cold start. Surface that wait as a transient
-    // notification instead of leaving the person staring at a quiet Output panel; it
-    // disappears as soon as the first line of real output (or an early exit/error) shows up.
-    vscode.window.withProgress(
-      {
-        location: vscode.ProgressLocation.Notification,
-        title: debug
-          ? `${server.name}: JVM 부팅 및 디버그 에이전트 연결 중...`
-          : `${server.name}: JVM 부팅 중...`,
-        cancellable: false
-      },
-      () =>
-        new Promise<void>(resolve => {
-          let settled = false;
-          const finish = () => {
-            if (settled) return;
-            settled = true;
-            resolve();
-          };
-          proc.stdout.once('data', finish);
-          proc.once('exit', finish);
-          proc.once('error', finish);
-        })
-    );
+    // Tomcat/the JVM print nothing at all until the JVM has booted and Catalina's own logging
+    // is initialized - normal, but can look like nothing is happening for several seconds,
+    // especially in debug mode where attaching the JDWP agent adds real startup overhead on
+    // top of the JVM's own cold start. Update the notification already showing (started at the
+    // top of this function) to reflect this phase; it disappears as soon as the first line of
+    // real output (or an early exit/error) shows up.
+    reportPhase(debug ? 'JVM 부팅 및 디버그 에이전트 연결 중...' : 'JVM 부팅 중...');
+    proc.stdout.once('data', resolveBoot);
+    proc.once('exit', resolveBoot);
+    proc.once('error', resolveBoot);
 
     const info: RunningInfo = { proc, status: 'starting', outputChannel, appStatus: new Map() };
     for (const app of server.deployedApps) {
