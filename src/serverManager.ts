@@ -579,6 +579,34 @@ export class ServerManager {
       shell: process.platform === 'win32'
     });
 
+    // Tomcat/the JVM print nothing at all until the JVM has booted and Catalina's own
+    // logging is initialized - normal, but can look like nothing is happening for several
+    // seconds, especially in debug mode where attaching the JDWP agent adds real startup
+    // overhead on top of the JVM's own cold start. Surface that wait as a transient
+    // notification instead of leaving the person staring at a quiet Output panel; it
+    // disappears as soon as the first line of real output (or an early exit/error) shows up.
+    vscode.window.withProgress(
+      {
+        location: vscode.ProgressLocation.Notification,
+        title: debug
+          ? `${server.name}: JVM 부팅 및 디버그 에이전트 연결 중...`
+          : `${server.name}: JVM 부팅 중...`,
+        cancellable: false
+      },
+      () =>
+        new Promise<void>(resolve => {
+          let settled = false;
+          const finish = () => {
+            if (settled) return;
+            settled = true;
+            resolve();
+          };
+          proc.stdout.once('data', finish);
+          proc.once('exit', finish);
+          proc.once('error', finish);
+        })
+    );
+
     const info: RunningInfo = { proc, status: 'starting', outputChannel, appStatus: new Map() };
     for (const app of server.deployedApps) {
       info.appStatus.set(app.contextPath, 'deploying');
