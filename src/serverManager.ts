@@ -49,6 +49,15 @@ function escapeXmlAttr(value: string): string {
 export class ServerManager {
   private servers: TomcatServerConfig[] = [];
   private running = new Map<string, RunningInfo>();
+  // Server ids currently between start() being invoked and the child process actually being
+  // spawned (registered into `running`). Covers the gap where output-channel setup, deploy-
+  // ignore file writes, and - for apps with live source sync - a full pre-start Maven/Gradle
+  // build can all run before there's a real process to track. Without this, getStatus() would
+  // keep reporting 'stopped' during that whole window: the tree wouldn't show "starting" and
+  // the `running.has(id)` double-start guard wouldn't catch a second click yet either, so a
+  // fast double-click (encouraged by that exact lack of visible feedback) could spawn two
+  // Tomcat processes for the same server.
+  private startingIds = new Set<string>();
   /** key: `${serverId}::${contextPath}` - active source-overlay file sync watchers */
   private syncWatchers = new Map<string, SourceSyncWatcher>();
   /** key: `${serverId}::${contextPath}` - active Java/resource auto-compile watchers */
@@ -129,6 +138,7 @@ export class ServerManager {
   }
 
   getStatus(id: string): ServerStatus {
+    if (this.startingIds.has(id)) return 'starting';
     return this.running.get(id)?.status ?? 'stopped';
   }
 
@@ -485,7 +495,29 @@ export class ServerManager {
       vscode.window.showInformationMessage(`${server.name} 은(는) 이미 실행 중입니다.`);
       return;
     }
+    if (this.startingIds.has(id)) {
+      vscode.window.showInformationMessage(`${server.name} 은(는) 이미 시작 중입니다.`);
+      return;
+    }
+    // Fire immediately, before any of the (potentially multi-second) setup work below - see
+    // the startingIds field comment for why this matters.
+    this.startingIds.add(id);
+    this._onDidChange.fire();
 
+    try {
+      await this.doStart(id, server, debug);
+    } finally {
+      // doStart() resolves right after the process is actually spawned and registered into
+      // `running` (everything after that is just attaching listeners, synchronously) - so by
+      // the time this fires, running.has(id) is already true and getStatus() reads from there
+      // instead. This also covers every early-exit/error path (an unexpected throw anywhere
+      // before the process gets spawned), so a failed start can always be retried rather than
+      // getting permanently stuck showing "starting".
+      this.startingIds.delete(id);
+    }
+  }
+
+  private async doStart(id: string, server: TomcatServerConfig, debug: boolean): Promise<void> {
     const script = this.getCatalinaScript(server.homePath);
     if (process.platform !== 'win32') {
       try {
