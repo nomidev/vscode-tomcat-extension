@@ -1141,8 +1141,17 @@ export class ServerManager {
   }
 
   private async registerDeployedApp(server: TomcatServerConfig, app: DeployedApp) {
-    server.deployedApps = server.deployedApps.filter(a => a.contextPath !== app.contextPath);
-    server.deployedApps.push(app);
+    // Keep apps in the order they were originally added: re-deploying an app that's already
+    // registered (same contextPath - e.g. re-running "Deploy WAR..." to push an updated
+    // build) replaces it in place rather than removing-then-pushing, which would otherwise
+    // bump it to the bottom of the tree every time. A genuinely new contextPath is appended,
+    // so first-time deploys still land in the order they were added.
+    const existingIndex = server.deployedApps.findIndex(a => a.contextPath === app.contextPath);
+    if (existingIndex >= 0) {
+      server.deployedApps[existingIndex] = app;
+    } else {
+      server.deployedApps.push(app);
+    }
     await this.save();
 
     // If the server's already running, this is a deploy-while-live (Tomcat's own autoDeploy
