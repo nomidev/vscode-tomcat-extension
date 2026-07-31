@@ -658,6 +658,16 @@ export class ServerManager {
       this._onDidChange.fire();
     };
 
+    // Filename must be followed by "]", whitespace, or end-of-line - not just found anywhere -
+    // so this can't match some unrelated line that merely mentions the filename in passing, and
+    // so "app.xml" can't accidentally match inside a longer name like "app.xml.bak". Newer
+    // Tomcat versions bracket these paths ("...[C:\...\lgcom.xml] has finished..."), but older
+    // ones (confirmed on 8.0.53) don't ("...C:\...\lgcom.xml has finished..." - no brackets at
+    // all) - matching on the boundary after the filename instead of specifically "]" covers
+    // both without caring which log format a given Tomcat version happens to use.
+    const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const deployFileNameBoundary = (fileName: string) => new RegExp(`${escapeRegExp(fileName)}(?:\\]|\\s|$)`);
+
     // Scans Tomcat log output for per-app deploy start/finish/failure lines and updates that
     // app's status accordingly. Line-based (rather than matching the raw chunk) so an unrelated
     // SEVERE line elsewhere in the same chunk can't be misattributed to an app whose "has
@@ -675,11 +685,7 @@ export class ServerManager {
         buffer = lines.pop() ?? '';
         for (const line of lines) {
           for (const m of matchers) {
-            // Tomcat always logs these identifiers inside square brackets, e.g.
-            // "[C:\...\lgcom.xml]" or "[/opt/tomcat/webapps/myapp.war]" - requiring the
-            // filename to be immediately followed by "]" keeps this from matching some
-            // unrelated line that merely mentions the filename in passing.
-            if (!line.includes(`${m.deployFileName}]`)) continue;
+            if (!deployFileNameBoundary(m.deployFileName).test(line)) continue;
             if (/SEVERE|Error deploying/i.test(line)) {
               setAppStatus(m.contextPath, 'failed');
             } else if (/has finished/i.test(line)) {
