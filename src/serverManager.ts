@@ -96,6 +96,18 @@ export class ServerManager {
     return vscode.workspace.getConfiguration(CONFIG_SECTION).get<string>('defaultLogLevel', 'INFO');
   }
 
+  /** Whether attaching the Java debugger should steal focus to the Debug Console panel.
+   *  Defaults to 'neverOpen' so our Output tab (where start/deploy messages are printed)
+   *  isn't yanked away the moment the debugger attaches. */
+  getDebugInternalConsoleOptions(): 'neverOpen' | 'openOnSessionStart' | 'openOnFirstSessionStart' {
+    return vscode.workspace
+      .getConfiguration(CONFIG_SECTION)
+      .get<'neverOpen' | 'openOnSessionStart' | 'openOnFirstSessionStart'>(
+        'debug.internalConsoleOptions',
+        'neverOpen'
+      );
+  }
+
   /** Relative path (e.g. "src/main/webapp") used to auto-detect the live source overlay for
    *  Maven/Gradle exploded deployments. Configurable for non-default project layouts. */
   getWebappSourceDir(): string {
@@ -878,10 +890,11 @@ export class ServerManager {
       request: 'attach',
       hostName: 'localhost',
       port: server.debugPort,
-      // Without this, VSCode's default ('openOnFirstSessionStart') steals focus to the
-      // Debug Console the moment the session attaches, switching away from our Output tab
-      // right after we print the "서버가 디버그 모드로 시작되었습니다" message.
-      internalConsoleOptions: 'neverOpen'
+      // Without an explicit value, VSCode's default ('openOnFirstSessionStart') steals focus
+      // to the Debug Console the moment the session attaches, switching away from our Output
+      // tab right after we print the "서버가 디버그 모드로 시작되었습니다" message. Configurable
+      // via tomcat.debug.internalConsoleOptions in case someone wants the Debug Console back.
+      internalConsoleOptions: this.getDebugInternalConsoleOptions()
     };
     try {
       const started = await vscode.debug.startDebugging(undefined, debugConfig);

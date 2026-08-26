@@ -1,7 +1,7 @@
 # Changelog
 
 ## 0.16.4
-- **디버그 모드로 서버를 시작하면 Output 탭이 자동으로 Debug Console로 전환되던 문제 수정**: Java 디버거를 attach할 때 쓰는 `DebugConfiguration`에 `internalConsoleOptions`를 지정하지 않아, VSCode 기본값(`openOnFirstSessionStart`)에 따라 세션이 붙는 순간 포커스가 Debug Console로 강제 전환됐습니다. "OO 서버가 디버그 모드로 시작되었습니다" 메시지를 Output 탭에 찍은 직후 화면이 훅 바뀌는 원인이었습니다. 이제 `internalConsoleOptions: 'neverOpen'`을 명시해서 자동 전환 없이 Output 탭이 그대로 유지됩니다.
+- **디버그 모드로 서버를 시작하면 Output 탭이 자동으로 Debug Console로 전환되던 문제 수정**: Java 디버거를 attach할 때 쓰는 `DebugConfiguration`에 `internalConsoleOptions`를 지정하지 않아, VSCode 기본값(`openOnFirstSessionStart`)에 따라 세션이 붙는 순간 포커스가 Debug Console로 강제 전환됐습니다. "OO 서버가 디버그 모드로 시작되었습니다" 메시지를 Output 탭에 찍은 직후 화면이 훅 바뀌는 원인이었습니다. 새 설정 `tomcat.debug.internalConsoleOptions`(기본값 `neverOpen`)로 동작을 고를 수 있으며, Debug Console 자동 전환을 원래대로 원하면 `openOnSessionStart`나 `openOnFirstSessionStart`로 바꾸면 됩니다.
 
 ## 0.16.3
 - **Tomcat 8.0.x/일부 8.5 환경에서 배포가 끝나도 계속 "배포 중"으로 뜨던 문제 수정**: 배포완료 로그에서 파일 경로를 감지할 때 "파일명 뒤에 `]`가 오는지"만 확인하고 있었는데, 이건 Tomcat 9 계열의 로그 포맷(`[...]` 괄호로 감쌈) 기준이었습니다. 실제로 Tomcat 8.0.53에서는 경로를 괄호 없이 그대로 찍습니다(`Deployment of configuration descriptor C:\...\lgcom.xml has finished in ...`). 이제 파일명 뒤에 `]`, 공백, 줄 끝 중 아무거나 오면 인식하도록 고쳐서 괄호 유무와 무관하게 동작합니다. 실제 두 로그 포맷으로 직접 검증했습니다.

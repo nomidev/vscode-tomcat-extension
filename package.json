@@ -59,6 +59,17 @@
           "default": "INFO",
           "description": "새로 추가되는 서버 및 개별 로그 레벨을 지정하지 않은 서버에 적용되는 기본 Tomcat 로그 레벨(java.util.logging). SEVERE가 가장 적게, FINEST가 가장 많이 출력합니다."
         },
+        "tomcat.debug.internalConsoleOptions": {
+          "type": "string",
+          "enum": ["neverOpen", "openOnSessionStart", "openOnFirstSessionStart"],
+          "enumDescriptions": [
+            "디버그 세션이 붙어도 Debug Console로 자동 전환하지 않고, 우리 확장의 Output 탭을 그대로 유지합니다.",
+            "디버그로 서버를 시작/재시작할 때마다 Debug Console로 자동 전환합니다.",
+            "VSCode 기본값. 이 창에서 처음 디버그 세션이 붙을 때만 Debug Console로 자동 전환합니다."
+          ],
+          "default": "neverOpen",
+          "description": "디버그 모드로 서버를 시작해 Java 디버거가 attach될 때, VSCode가 Debug Console 패널로 포커스를 자동 전환할지 여부입니다."
+        },
         "tomcat.webappSourceDir": {
           "type": "string",
           "default": "src/main/webapp",
