@@ -877,7 +877,11 @@ export class ServerManager {
       name: `Attach to ${server.name}`,
       request: 'attach',
       hostName: 'localhost',
-      port: server.debugPort
+      port: server.debugPort,
+      // Without this, VSCode's default ('openOnFirstSessionStart') steals focus to the
+      // Debug Console the moment the session attaches, switching away from our Output tab
+      // right after we print the "서버가 디버그 모드로 시작되었습니다" message.
+      internalConsoleOptions: 'neverOpen'
     };
     try {
       const started = await vscode.debug.startDebugging(undefined, debugConfig);
