@@ -21,7 +21,6 @@ function appStatusLabel(status: AppStatus): string {
     case 'running': return '● 실행 중';
     case 'deploying': return '◐ 배포 중...';
     case 'failed': return '✕ 배포 실패';
-    case 'disabled': return '⊘ 비활성화됨';
     default: return '○ 중지됨';
   }
 }
@@ -46,7 +45,7 @@ export class AppTreeItem extends vscode.TreeItem {
     const live = isAppLive(appStatus);
     const overlay = app.sourceOverlayPath ? ` · live sync · reload:${app.reloadable ? 'auto' : 'manual'}` : '';
     this.description = `${appStatusLabel(appStatus)} · ${app.type === 'war' ? 'WAR' : 'exploded'}${overlay}`;
-    this.contextValue = `tomcatApp-${app.type}-${app.disabled ? 'disabled' : 'enabled'}`;
+    this.contextValue = `tomcatApp-${app.type}`;
     this.iconPath = new vscode.ThemeIcon(
       appIconForStatus(app.type, appStatus),
       live ? new vscode.ThemeColor('testing.iconPassed') : appStatus === 'failed' ? new vscode.ThemeColor('testing.iconFailed') : undefined
@@ -58,8 +57,6 @@ export class AppTreeItem extends vscode.TreeItem {
         ? '서버가 이 앱을 배포하는 중입니다. 앱이 크거나 초기화 로직이 무거우면 서버 자체는 떠도 이 앱만 잠시 더 걸릴 수 있습니다.'
         : appStatus === 'failed'
         ? '이 앱은 배포/기동 중 오류가 발생해 서비스되지 않고 있습니다. Output 채널의 로그를 확인하세요.'
-        : appStatus === 'disabled'
-        ? 'undeploy 하지 않고 비활성화된 앱입니다. 파일/컨텍스트는 그대로 있으며, 요청은 전부 응답하지 않습니다. 다시 활성화하면 재배포 없이 즉시 서비스됩니다.'
         : '서버가 중지되어 있어 이 앱은 현재 서비스되고 있지 않습니다. 서버를 시작하면 반영됩니다.';
     this.tooltip = app.sourceOverlayPath
       ? `${app.sourcePath}\n${liveNote}\nLive source sync from: ${app.sourceOverlayPath}\nAuto context reload: ${app.reloadable ? 'on' : 'off (debugger hot-swap + manual Reload Context Now)'}`
@@ -70,7 +67,6 @@ export class AppTreeItem extends vscode.TreeItem {
 function appIconForStatus(type: 'war' | 'exploded', status: AppStatus): string {
   if (status === 'deploying') return 'sync~spin';
   if (status === 'failed') return 'error';
-  if (status === 'disabled') return 'circle-slash';
   return type === 'war' ? 'file-zip' : 'folder';
 }
 

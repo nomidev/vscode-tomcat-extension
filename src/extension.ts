@@ -7,7 +7,7 @@ import { findMetaInfContext, parseMetaInfContext } from './contextXml';
 import { LOG_LEVELS, TomcatServerConfig } from './model';
 import { detectWebappSource, isExplodedWebappFolder, resolveProjectRoot, detectBuildInfo } from './sourceOverlay';
 import { buildExplodedWebapp, findExistingExplodedOutput } from './explodedBuild';
-import { hasManagerApp, ensureManagerUser, resetManagerUser, reloadContext, stopContext, startContext } from './tomcatManager';
+import { hasManagerApp, ensureManagerUser, resetManagerUser, reloadContext } from './tomcatManager';
 
 let activeManager: ServerManager | undefined;
 
@@ -230,99 +230,6 @@ export function activate(context: vscode.ExtensionContext) {
         `서버를 재시작하거나 "Reload Context Now" 를 다시 시도해주세요.`
     );
   }
-
-  /**
-   * Calls the Manager text API's 'stop'/'start' command for a single context - used both by
-   * the explicit "Disable App"/"Enable App" commands and automatically right after Tomcat
-   * (re)deploys an app that's flagged disabled (Tomcat's own autoDeploy always starts a
-   * freshly-deployed context, so that state needs to be re-applied every time). Mirrors
-   * ensureContextReloaded's credential/401 handling; `quiet` suppresses the success toast for
-   * the automatic-resync case, where the tree's status icon already communicates it.
-   */
-  async function ensureManagerStopStart(
-    server: TomcatServerConfig,
-    contextPath: string,
-    action: 'stop' | 'start',
-    options: { quiet?: boolean } = {}
-  ): Promise<void> {
-    const status = manager.getStatus(server.id);
-    if (status !== 'running' && status !== 'debugging') {
-      return; // nothing live to change - the choice is already persisted and will apply on next start
-    }
-
-    if (!hasManagerApp(server.homePath)) {
-      vscode.window.showWarningMessage(
-        `이 Tomcat 설치에는 Manager 웹앱이 없어 "${contextPath}" 를 지금 서버에서 ${
-          action === 'stop' ? '중지' : '재시작'
-        }할 수 없습니다. 설정은 저장됐으니 서버를 재시작하면 반영됩니다.`
-      );
-      return;
-    }
-
-    const creds = await ensureManagerUser(server, context.secrets);
-    if (creds.justProvisioned) {
-      const choice = await vscode.window.showInformationMessage(
-        `"${contextPath}" 를 지금 서버에 ${
-          action === 'stop' ? '비활성화' : '활성화'
-        }하려면 Tomcat Manager 계정이 필요한데, 방금 새로 만들었습니다. 최초 1회는 서버를 재시작해야 활성화됩니다. 지금 재시작할까요?`,
-        '지금 재시작',
-        '나중에'
-      );
-      if (choice === '지금 재시작') {
-        await manager.restart(server.id, status === 'debugging');
-        vscode.window.showInformationMessage('재시작 완료. 변경사항이 반영되었습니다.');
-      } else {
-        vscode.window.showWarningMessage('설정은 저장됐지만, 서버를 재시작해야 실제로 적용됩니다.');
-      }
-      return;
-    }
-
-    const timeoutSeconds = vscode.workspace.getConfiguration('tomcat').get<number>('managerRequestTimeoutSeconds', 45);
-    const call = action === 'stop' ? stopContext : startContext;
-    const result = await call(server, creds, contextPath, timeoutSeconds * 1000);
-    const channel = manager.getOutputChannel(server.id);
-    channel?.appendLine(`[manager] ${action} ${contextPath || '/'}: ${result.message}`);
-
-    if (result.ok) {
-      if (!options.quiet) {
-        vscode.window.showInformationMessage(
-          action === 'stop'
-            ? `"${contextPath}" 를 비활성화했습니다. 파일은 그대로 유지되며 요청에 응답하지 않습니다.`
-            : `"${contextPath}" 를 다시 활성화했습니다.`
-        );
-      }
-      return;
-    }
-
-    if (result.statusCode === 401) {
-      const choice = await vscode.window.showErrorMessage(
-        `"${contextPath}" 를 ${action === 'stop' ? '비활성화' : '활성화'}하려던 중 Tomcat Manager 인증에 실패했습니다 (401). 저장된 계정 정보가 서버와 어긋난 것 같습니다.`,
-        '자격 증명 초기화 후 재시작',
-        '취소'
-      );
-      if (choice === '자격 증명 초기화 후 재시작') {
-        await resetManagerUser(server, context.secrets);
-        await manager.restart(server.id, status === 'debugging');
-        vscode.window.showInformationMessage('Manager 계정을 새로 만들고 서버를 재시작했습니다. 변경사항이 반영되었습니다.');
-      } else {
-        vscode.window.showWarningMessage('설정은 저장됐지만, 서버를 재시작해야 실제로 적용됩니다.');
-      }
-      return;
-    }
-
-    vscode.window.showWarningMessage(
-      `"${contextPath}" 를 지금 서버에 반영하지 못했습니다 (${result.message}). 설정은 저장됐으니, ` +
-        `서버를 재시작하거나 다시 시도해주세요.`
-    );
-  }
-
-  // Whenever doStart() notices it just (re)deployed an app that's flagged disabled, follow up
-  // with the actual Manager 'stop' call - see the comment on onAppNeedsStopSync for why this
-  // has to happen every time (not just when the user first clicks "Disable App").
-  manager.onAppNeedsStopSync(({ serverId, contextPath }) => {
-    const server = manager.getServer(serverId);
-    if (server) void ensureManagerStopStart(server, contextPath, 'stop', { quiet: true });
-  });
 
   reg('tomcat.refresh', () => treeProvider.refresh());
 
@@ -878,18 +785,6 @@ export function activate(context: vscode.ExtensionContext) {
         `"${item.app.contextPath}" 를 undeploy 했습니다. Tomcat 이 자동으로 감지해 서비스에서 내립니다 (전체 서버 재시작 없음).`
       );
     }
-  });
-
-  reg('tomcat.disableApp', async (item: AppTreeItem) => {
-    if (!item) return;
-    await manager.setAppDisabled(item.server.id, item.app.contextPath, true);
-    await ensureManagerStopStart(item.server, item.app.contextPath, 'stop');
-  });
-
-  reg('tomcat.enableApp', async (item: AppTreeItem) => {
-    if (!item) return;
-    await manager.setAppDisabled(item.server.id, item.app.contextPath, false);
-    await ensureManagerStopStart(item.server, item.app.contextPath, 'start');
   });
 
   reg('tomcat.openBrowser', async (item: AppTreeItem) => {
