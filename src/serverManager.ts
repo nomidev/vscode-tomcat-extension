@@ -66,6 +66,14 @@ export class ServerManager {
   private _onDidChange = new vscode.EventEmitter<void>();
   readonly onDidChange = this._onDidChange.event;
 
+  /** Fires right after Tomcat finishes (re)deploying an app that's flagged `disabled` - Tomcat's
+   *  own autoDeploy always starts a context by default, so we need to immediately issue a
+   *  Manager 'stop' call to re-apply the user's choice. The actual Manager API call (needs
+   *  credentials/UI for 401 recovery) is handled by extension.ts, same division of
+   *  responsibility as the rest of this class. */
+  private _onAppNeedsStopSync = new vscode.EventEmitter<{ serverId: string; contextPath: string }>();
+  readonly onAppNeedsStopSync = this._onAppNeedsStopSync.event;
+
   constructor(private context: vscode.ExtensionContext) {
     const config = vscode.workspace.getConfiguration(CONFIG_SECTION);
     let servers = config.get<TomcatServerConfig[]>(CONFIG_KEY, []);
@@ -154,11 +162,15 @@ export class ServerManager {
     return this.running.get(id)?.status ?? 'stopped';
   }
 
-  /** Per-app status. Falls back to 'stopped' whenever the server itself has no running entry
-   *  (not started yet, or already stopped/exited) or the app was deployed after the server
-   *  process launched and hasn't been through a start() cycle's tracking yet. */
+  /** Per-app status. Falls back to 'stopped' (or 'disabled', if the app is flagged that way)
+   *  whenever the server itself has no running entry (not started yet, or already
+   *  stopped/exited) or the app was deployed after the server process launched and hasn't
+   *  been through a start() cycle's tracking yet. */
   getAppStatus(id: string, contextPath: string): AppStatus {
-    return this.running.get(id)?.appStatus.get(contextPath) ?? 'stopped';
+    const live = this.running.get(id)?.appStatus.get(contextPath);
+    if (live) return live;
+    const disabled = this.getServer(id)?.deployedApps.find(a => a.contextPath === contextPath)?.disabled;
+    return disabled ? 'disabled' : 'stopped';
   }
 
   // ---------- server registration ----------
@@ -701,7 +713,13 @@ export class ServerManager {
             if (/SEVERE|Error deploying/i.test(line)) {
               setAppStatus(m.contextPath, 'failed');
             } else if (/has finished/i.test(line)) {
-              setAppStatus(m.contextPath, 'running');
+              const app = server.deployedApps.find(a => a.contextPath === m.contextPath);
+              if (app?.disabled) {
+                setAppStatus(m.contextPath, 'disabled');
+                this._onAppNeedsStopSync.fire({ serverId: id, contextPath: m.contextPath });
+              } else {
+                setAppStatus(m.contextPath, 'running');
+              }
             }
           }
           const contextFailMatch = /Context \[([^\]]*)\] startup failed due to previous errors/.exec(line);
@@ -1187,6 +1205,34 @@ export class ServerManager {
     if (info) {
       info.appStatus.set(app.contextPath, 'deploying');
       this._onDidChange.fire();
+    }
+  }
+
+  /** Persists the user's disable/enable choice for an app. Does not itself call the Manager
+   *  API (extension.ts does that, since it owns credential handling/401 recovery) - this just
+   *  updates the saved config so the choice is (a) reflected in the tree immediately and (b)
+   *  re-applied automatically the next time Tomcat (re)deploys this app (see the 'has
+   *  finished' handling in doStart above). */
+  async setAppDisabled(id: string, contextPath: string, disabled: boolean): Promise<void> {
+    const server = this.getServer(id);
+    if (!server) return;
+    const app = server.deployedApps.find(a => a.contextPath === contextPath);
+    if (!app) return;
+
+    app.disabled = disabled;
+    await this.save();
+
+    const info = this.running.get(id);
+    if (info) {
+      const current = info.appStatus.get(contextPath);
+      // Only touch the *tree's* transient status here if it isn't already mid-flight
+      // ('deploying') - the actual Manager stop/start call and its result (success/failure)
+      // updates appStatus for real; this just keeps the icon from looking stale in the
+      // meantime for the common case (app already running/stopped/disabled).
+      if (current !== 'deploying') {
+        info.appStatus.set(contextPath, disabled ? 'disabled' : current === 'disabled' ? 'running' : (current ?? 'stopped'));
+        this._onDidChange.fire();
+      }
     }
   }
 

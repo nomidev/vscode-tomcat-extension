@@ -3,7 +3,7 @@ export type ServerStatus = 'stopped' | 'starting' | 'running' | 'debugging' | 's
 /** Per-app deployment status, tracked independently of the server's own status. A server can
  *  be fully 'running' while one of its apps is still 'deploying' (large app, slow context init)
  *  or ended up 'failed' (e.g. a listener threw during startup) while its siblings came up fine. */
-export type AppStatus = 'stopped' | 'deploying' | 'running' | 'failed';
+export type AppStatus = 'stopped' | 'deploying' | 'running' | 'failed' | 'disabled';
 
 export interface DeployedApp {
   /** e.g. "/myapp" or "" for ROOT */
@@ -32,6 +32,11 @@ export interface DeployedApp {
    *  anything hot-swap can't handle (new fields/methods/classes).
    */
   reloadable?: boolean;
+  /** Whether the user explicitly disabled this app (Tomcat Manager 'stop' state) without
+   *  undeploying it - files/context.xml stay in place, but it won't serve requests until
+   *  re-enabled. Persisted so it's re-applied every time Tomcat (re)deploys the app, since
+   *  Tomcat's own autoDeploy always starts a newly-deployed context by default. */
+  disabled?: boolean;
 }
 
 export interface TomcatServerConfig {

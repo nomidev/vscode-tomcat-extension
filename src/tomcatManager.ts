@@ -187,3 +187,26 @@ export function reloadContext(
 ): Promise<ManagerResult> {
   return callManager(server, creds, 'reload', { path: contextPath || '/' }, timeoutMs);
 }
+
+/** Stops (disables) an already-deployed context without undeploying it - files, context.xml
+ *  and Manager registration all stay in place, but the context returns 404 to every request
+ *  until start()/enabled again. This is the Manager text API's 'stop' command, distinct from
+ *  removing the app entirely. */
+export function stopContext(
+  server: TomcatServerConfig,
+  creds: ManagerCredentials,
+  contextPath: string,
+  timeoutMs?: number
+): Promise<ManagerResult> {
+  return callManager(server, creds, 'stop', { path: contextPath || '/' }, timeoutMs);
+}
+
+/** Re-starts a context previously stopped with stopContext(), without redeploying it. */
+export function startContext(
+  server: TomcatServerConfig,
+  creds: ManagerCredentials,
+  contextPath: string,
+  timeoutMs?: number
+): Promise<ManagerResult> {
+  return callManager(server, creds, 'start', { path: contextPath || '/' }, timeoutMs);
+}

@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.16.5
+- **앱 비활성화(Disable App) 기능 추가**: 배포된 앱을 undeploy하지 않고도 서비스에서만 내릴 수 있습니다. 파일/context.xml/Manager 등록은 그대로 유지한 채 Tomcat Manager의 `stop` 명령으로 요청 응답만 막고, 다시 "Enable App"을 누르면 재배포 없이 즉시 서비스로 복귀합니다. 서버 재시작이나 소스 변경으로 앱이 다시 배포될 때도(Tomcat 이 기본적으로 자동 시작시키므로) 비활성화 상태가 자동으로 재적용됩니다. 트리에서 앱 아이콘/컨텍스트 메뉴로 토글할 수 있습니다.
+
 ## 0.16.4
 - **디버그 모드로 서버를 시작하면 Output 탭이 자동으로 Debug Console로 전환되던 문제 수정**: Java 디버거를 attach할 때 쓰는 `DebugConfiguration`에 `internalConsoleOptions`를 지정하지 않아, VSCode 기본값(`openOnFirstSessionStart`)에 따라 세션이 붙는 순간 포커스가 Debug Console로 강제 전환됐습니다. "OO 서버가 디버그 모드로 시작되었습니다" 메시지를 Output 탭에 찍은 직후 화면이 훅 바뀌는 원인이었습니다. 새 설정 `tomcat.debug.internalConsoleOptions`(기본값 `neverOpen`)로 동작을 고를 수 있으며, Debug Console 자동 전환을 원래대로 원하면 `openOnSessionStart`나 `openOnFirstSessionStart`로 바꾸면 됩니다.
 
