@@ -31,12 +31,21 @@ export class JavaBuildSyncWatcher {
   private handles: RecursiveWatchHandle[] = [];
   private pending = new Map<string, string>(); // relPath -> outDir it came from
   private flushTimer: ReturnType<typeof setTimeout> | undefined;
+  private lastSyncAt: number | undefined;
 
   constructor(
     private buildInfo: BuildInfo,
     private classesTargetDir: string,
     private log: Logger = () => {}
   ) {}
+
+  /** Timestamp (Date.now()) of the last time this watcher actually copied or removed a file -
+   *  i.e. the last time this app's compiled output genuinely changed. undefined if it never
+   *  has. Used to narrow "which app(s) does this hot-swap failure actually belong to" down
+   *  from "every live-synced app on the server" to "the one(s) whose code just changed". */
+  getLastSyncAt(): number | undefined {
+    return this.lastSyncAt;
+  }
 
   start(): void {
     const dirs = this.buildInfo.classesOutDirs;
@@ -133,6 +142,7 @@ export class JavaBuildSyncWatcher {
     }
 
     if (copied || removed) {
+      this.lastSyncAt = Date.now();
       const summary = [copied && `${copied}개 복사`, removed && `${removed}개 삭제`].filter(Boolean).join(', ');
       const relPaths = entries.map(([p]) => p);
       const sample = relPaths.slice(0, 3).join(', ') + (relPaths.length > 3 ? ` 외 ${relPaths.length - 3}개` : '');

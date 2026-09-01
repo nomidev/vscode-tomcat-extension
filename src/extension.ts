@@ -101,10 +101,26 @@ export function activate(context: vscode.ExtensionContext) {
           const liveApps = current.deployedApps.filter(a => a.type === 'exploded' && a.sourceOverlayPath);
           if (liveApps.length === 0) return;
 
+          // A save only ever recompiles the project(s) you actually edited, so narrow down to
+          // the app(s) whose WEB-INF/classes really changed recently instead of reloading
+          // every live-synced app on the server (which used to happen here - unnecessarily
+          // killing/restarting Spring/Quartz/etc. in completely unrelated apps on every hot-
+          // swap failure). 10s is generous slack for the debounce above plus a slow compile;
+          // if nothing qualifies (e.g. javaAutoBuild is off, or timing was unlucky) we fall
+          // back to the old "reload everything live" behavior so a real failure is never
+          // silently missed.
+          const recentlyChangedPaths = new Set(manager.getRecentlyChangedApps(server.id, 10_000));
+          const targets =
+            recentlyChangedPaths.size > 0
+              ? liveApps.filter(a => recentlyChangedPaths.has(a.contextPath))
+              : liveApps;
+
           channel?.appendLine(
-            `[debug] hot-swap 실패로 보여 자동으로 컨텍스트를 리로드합니다 (${liveApps.length}개 앱).`
+            `[debug] hot-swap 실패로 보여 자동으로 컨텍스트를 리로드합니다 (${targets.length}개 앱${
+              recentlyChangedPaths.size > 0 ? '' : ' - 최근 변경 감지 실패, 안전하게 전체 리로드'
+            }).`
           );
-          for (const app of liveApps) {
+          for (const app of targets) {
             await ensureContextReloaded(current, app.contextPath, { quiet: true });
           }
           vscode.window.showInformationMessage(

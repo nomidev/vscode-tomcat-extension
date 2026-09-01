@@ -230,6 +230,24 @@ export class ServerManager {
     return `${serverId}::${contextPath}`;
   }
 
+  /** Which of this server's live-synced apps actually had a class file change within the
+   *  last `withinMs` ms, per that app's JavaBuildSyncWatcher. Used so a hot-swap-failure
+   *  fallback reload only touches the app(s) whose code just changed instead of every
+   *  live-synced app on the server - a save only ever recompiles the project(s) you edited. */
+  getRecentlyChangedApps(serverId: string, withinMs: number): string[] {
+    const now = Date.now();
+    const prefix = `${serverId}::`;
+    const result: string[] = [];
+    for (const [key, watcher] of this.buildWatchers) {
+      if (!key.startsWith(prefix)) continue;
+      const lastSyncAt = watcher.getLastSyncAt();
+      if (lastSyncAt !== undefined && now - lastSyncAt <= withinMs) {
+        result.push(key.slice(prefix.length));
+      }
+    }
+    return result;
+  }
+
   private startSourceSync(serverId: string, contextPath: string, overlayPath: string, docBase: string) {
     this.stopSourceSync(serverId, contextPath);
     const outputChannel = this.running.get(serverId)?.outputChannel;

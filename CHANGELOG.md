@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.16.5
+- **핫스왑 실패 시 자동 fallback 리로드가 서버의 모든 live-sync 앱을 리로드하던 문제 수정**: 지금까지는 어떤 앱의 클래스를 고쳤든 상관없이, JDWP `hotcodereplace` 이벤트 자체에 어떤 앱(context)에서 실패했는지 정보가 없다는 이유로 서버에 배포된 **모든** exploded 라이브싱크 앱을 통째로 Reload Context Now 했습니다. 앱이 여러 개 떠 있는 서버에서 하나만 고쳐도 나머지 앱들(Spring/Quartz/스케줄러 등)까지 매번 죽였다 살리면서 불필요하게 느려지고, Quartz/logback 같은 백그라운드 스레드가 정리 안 되는 리소스 누수도 앱 개수만큼 배로 쌓이는 원인이었습니다. 이제 각 앱의 `JavaBuildSyncWatcher`가 마지막으로 실제 파일을 복사/삭제한 시각을 기록해두고, 핫스왑 실패 감지 시 최근 10초 안에 클래스가 바뀐 앱만 골라서 리로드합니다. (무엇을 리로드해야 할지 도저히 알 수 없는 경우에만 안전하게 예전처럼 전체 리로드로 폴백합니다.)
+
 ## 0.16.4
 - **디버그 모드로 서버를 시작하면 Output 탭이 자동으로 Debug Console로 전환되던 문제 수정**: Java 디버거를 attach할 때 쓰는 `DebugConfiguration`에 `internalConsoleOptions`를 지정하지 않아, VSCode 기본값(`openOnFirstSessionStart`)에 따라 세션이 붙는 순간 포커스가 Debug Console로 강제 전환됐습니다. "OO 서버가 디버그 모드로 시작되었습니다" 메시지를 Output 탭에 찍은 직후 화면이 훅 바뀌는 원인이었습니다. 새 설정 `tomcat.debug.internalConsoleOptions`(기본값 `neverOpen`)로 동작을 고를 수 있으며, Debug Console 자동 전환을 원래대로 원하면 `openOnSessionStart`나 `openOnFirstSessionStart`로 바꾸면 됩니다.
 
