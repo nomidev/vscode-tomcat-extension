@@ -46,6 +46,28 @@ export function activate(context: vscode.ExtensionContext) {
   // end up reflected without needing to notice the failure and intervene by hand.
   const debugSessionServers = new Map<string, TomcatServerConfig>();
   const hotSwapFallbackTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  // Only used when tomcat.hotSwapFallbackTrigger is 'onResume': the set of contextPaths queued
+  // up to reload for a server, accumulated from every hot-swap failure seen since the last
+  // flush, and flushed the next time that server's debug session resumes (DAP 'continued'
+  // event - fires on Continue/Step Over/Step Into/Step Out). Snapshotting each app's "recently
+  // changed" set right when the failure happens (not at resume time, which could be much
+  // later) is what makes this reliable even if the person stays paused for a while.
+  const pendingHotSwapApps = new Map<string, Set<string>>();
+
+  async function flushHotSwapFallback(server: TomcatServerConfig, channel: vscode.OutputChannel | undefined) {
+    const current = manager.getServer(server.id);
+    const contextPaths = pendingHotSwapApps.get(server.id);
+    pendingHotSwapApps.delete(server.id);
+    if (!current || !contextPaths || contextPaths.size === 0) return;
+
+    channel?.appendLine(`[debug] hot-swap 실패로 보여 자동으로 컨텍스트를 리로드합니다 (${contextPaths.size}개 앱).`);
+    for (const contextPath of contextPaths) {
+      await ensureContextReloaded(current, contextPath, { quiet: true });
+    }
+    vscode.window.showInformationMessage(
+      `"${server.name}": 핫스왑이 실패한 것 같아 자동으로 컨텍스트를 리로드해 변경사항을 반영했습니다.`
+    );
+  }
 
   context.subscriptions.push(
     vscode.debug.onDidStartDebugSession(session => {
@@ -59,6 +81,26 @@ export function activate(context: vscode.ExtensionContext) {
   context.subscriptions.push(
     vscode.debug.onDidTerminateDebugSession(session => {
       debugSessionServers.delete(session.id);
+    })
+  );
+
+  // Standard DAP events (as opposed to the custom hotcodereplace ones above) don't come
+  // through onDidReceiveDebugSessionCustomEvent - a DebugAdapterTracker is the only way to
+  // observe them. This exists solely to detect 'continued' (execution resuming after being
+  // stopped, i.e. Continue/Step Over/Step Into/Step Out - "leaving the current frame") for
+  // the 'onResume' hotSwapFallbackTrigger mode.
+  context.subscriptions.push(
+    vscode.debug.registerDebugAdapterTrackerFactory('java', {
+      createDebugAdapterTracker(session) {
+        return {
+          onDidSendMessage(message: any) {
+            if (message?.type !== 'event' || message.event !== 'continued') return;
+            const server = debugSessionServers.get(session.id);
+            if (!server || !pendingHotSwapApps.has(server.id)) return;
+            void flushHotSwapFallback(server, manager.getOutputChannel(server.id));
+          }
+        };
+      }
     })
   );
 
@@ -87,45 +129,57 @@ export function activate(context: vscode.ExtensionContext) {
         return;
       }
 
-      // Debounce per server: a single failed hot-swap attempt can emit more than one custom
-      // event in quick succession, and we only want to reload once per actual save, not once
-      // per event.
+      const current = manager.getServer(server.id);
+      if (!current) return;
+      const liveApps = current.deployedApps.filter(a => a.type === 'exploded' && a.sourceOverlayPath);
+      if (liveApps.length === 0) return;
+
+      // A save only ever recompiles the project(s) you actually edited, so narrow down to the
+      // app(s) whose WEB-INF/classes really changed recently instead of reloading every
+      // live-synced app on the server (which used to happen here - unnecessarily
+      // killing/restarting Spring/Quartz/etc. in completely unrelated apps on every hot-swap
+      // failure). Snapshotting this now (not later, at execution time) matters most for
+      // 'onResume' mode below, where execution could happen minutes after this event; 10s is
+      // generous slack for a slow compile right after the save that triggered this failure.
+      // If nothing qualifies (e.g. javaAutoBuild is off, or timing was unlucky) we fall back
+      // to "reload everything live" so a real failure is never silently missed.
+      const recentlyChangedPaths = new Set(manager.getRecentlyChangedApps(server.id, 10_000));
+      const targets = (recentlyChangedPaths.size > 0 ? liveApps.filter(a => recentlyChangedPaths.has(a.contextPath)) : liveApps).map(
+        a => a.contextPath
+      );
+
+      const trigger = vscode.workspace
+        .getConfiguration('tomcat')
+        .get<'immediate' | 'onResume'>('hotSwapFallbackTrigger', 'immediate');
+
+      if (trigger === 'onResume') {
+        // Just queue it - flushHotSwapFallback() runs the next time this session's debug
+        // adapter reports a 'continued' event (see registerDebugAdapterTrackerFactory above).
+        // Accumulate rather than overwrite, since more than one app/file can fail to hot-swap
+        // while the person stays paused before resuming.
+        const pending = pendingHotSwapApps.get(server.id) ?? new Set<string>();
+        for (const contextPath of targets) pending.add(contextPath);
+        pendingHotSwapApps.set(server.id, pending);
+        channel?.appendLine(
+          `[debug] hot-swap 실패로 보여 컨텍스트 리로드를 대기열에 넣었습니다 (${pending.size}개 앱, 실행 재개 시 반영).`
+        );
+        return;
+      }
+
+      // 'immediate' mode (default): debounce per server, since a single failed hot-swap
+      // attempt can emit more than one custom event in quick succession, and we only want to
+      // reload once per actual save, not once per event.
+      const pending = pendingHotSwapApps.get(server.id) ?? new Set<string>();
+      for (const contextPath of targets) pending.add(contextPath);
+      pendingHotSwapApps.set(server.id, pending);
+
       const existingTimer = hotSwapFallbackTimers.get(server.id);
       if (existingTimer) clearTimeout(existingTimer);
       hotSwapFallbackTimers.set(
         server.id,
-        setTimeout(async () => {
+        setTimeout(() => {
           hotSwapFallbackTimers.delete(server.id);
-          const current = manager.getServer(server.id);
-          if (!current) return;
-          const liveApps = current.deployedApps.filter(a => a.type === 'exploded' && a.sourceOverlayPath);
-          if (liveApps.length === 0) return;
-
-          // A save only ever recompiles the project(s) you actually edited, so narrow down to
-          // the app(s) whose WEB-INF/classes really changed recently instead of reloading
-          // every live-synced app on the server (which used to happen here - unnecessarily
-          // killing/restarting Spring/Quartz/etc. in completely unrelated apps on every hot-
-          // swap failure). 10s is generous slack for the debounce above plus a slow compile;
-          // if nothing qualifies (e.g. javaAutoBuild is off, or timing was unlucky) we fall
-          // back to the old "reload everything live" behavior so a real failure is never
-          // silently missed.
-          const recentlyChangedPaths = new Set(manager.getRecentlyChangedApps(server.id, 10_000));
-          const targets =
-            recentlyChangedPaths.size > 0
-              ? liveApps.filter(a => recentlyChangedPaths.has(a.contextPath))
-              : liveApps;
-
-          channel?.appendLine(
-            `[debug] hot-swap 실패로 보여 자동으로 컨텍스트를 리로드합니다 (${targets.length}개 앱${
-              recentlyChangedPaths.size > 0 ? '' : ' - 최근 변경 감지 실패, 안전하게 전체 리로드'
-            }).`
-          );
-          for (const app of targets) {
-            await ensureContextReloaded(current, app.contextPath, { quiet: true });
-          }
-          vscode.window.showInformationMessage(
-            `"${server.name}": 핫스왑이 실패한 것 같아 자동으로 컨텍스트를 리로드해 변경사항을 반영했습니다.`
-          );
+          void flushHotSwapFallback(server, channel);
         }, 500)
       );
     })

@@ -2,7 +2,7 @@
   "name": "vscode-tomcat",
   "displayName": "Tomcat for VSCode",
   "description": "Local Apache Tomcat integration for VSCode: register servers, deploy WAR/exploded apps, start/stop/debug, live JSP/Java reload, and view console logs.",
-  "version": "0.16.5",
+  "version": "0.16.6",
   "publisher": "local-dev",
   "repository": {
     "type": "git",
@@ -104,6 +104,16 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "켜면(기본값) 디버그 모드에서 Java 저장 시 핫스왑(코드 교체)이 실패한 것으로 보이면, 알림만 띄우고 끝내는 대신 그 서버의 라이브 리로드가 켜진 앱들에 **자동으로 \"Reload Context Now\" 를 실행**합니다. 핫스왑은 대형/복잡한 프로젝트일수록 불안정해지는 JVM 자체의 알려진 한계라, 매번 수동으로 리로드 버튼을 누르지 않아도 항상 확실하게 반영되도록 하기 위함입니다. 끄면 알림만 뜨고 직접 \"Reload Context Now\" 를 눌러야 합니다."
+        },
+        "tomcat.hotSwapFallbackTrigger": {
+          "type": "string",
+          "enum": ["immediate", "onResume"],
+          "enumDescriptions": [
+            "핫스왑 실패가 감지되면(저장 직후) 바로 Reload Context Now 를 실행합니다.",
+            "핫스왑 실패가 감지돼도 바로 실행하지 않고, 디버거가 다시 실행을 재개할 때(Continue/Step Over/Step Into/Step Out 로 현재 프레임을 벗어날 때)까지 기다렸다가 그 시점에 실행합니다. 중단점에서 여러 곳을 고치는 동안은 리로드가 끼어들지 않고, 다시 실행을 이어갈 때 한 번에 반영됩니다."
+          ],
+          "default": "immediate",
+          "markdownDescription": "`tomcat.autoReloadOnHotSwapFailure` 가 켜져 있을 때, 자동 리로드를 정확히 언제 실행할지 정합니다. `immediate`(기본값)는 저장 직후 바로 실행하고, `onResume`은 디버거가 다음으로 실행을 재개하는 순간까지 미룹니다."
         },
         "tomcat.excludeDefaultWebapps": {
           "type": "boolean",
