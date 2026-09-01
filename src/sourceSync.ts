@@ -4,6 +4,14 @@ import { watchRecursive, copyDirRecursive, filesAreIdentical, RecursiveWatchHand
 
 type Logger = (message: string) => void;
 
+/** When to actually copy a change through to the deployed app:
+ *  - 'onChange' (default): shortly after each save, same as always.
+ *  - 'onWindowBlur': not until VSCode's window itself loses focus (e.g. switching to the
+ *    browser to test) - changes still accumulate immediately, they're just not written
+ *    through until then. Mirrors IntelliJ's "Upload changed files automatically ... On frame
+ *    deactivation" deployment option. */
+export type SyncTrigger = 'onChange' | 'onWindowBlur';
+
 /**
  * Mirrors a source folder (e.g. src/main/webapp) into a deployed docBase folder by copying
  * files over on change.
@@ -30,7 +38,12 @@ export class SourceSyncWatcher {
   private pending = new Set<string>();
   private flushTimer: ReturnType<typeof setTimeout> | undefined;
 
-  constructor(private sourceDir: string, private targetDir: string, private log: Logger = () => {}) {}
+  constructor(
+    private sourceDir: string,
+    private targetDir: string,
+    private log: Logger = () => {},
+    private trigger: SyncTrigger = 'onChange'
+  ) {}
 
   start(): void {
     if (!fs.existsSync(this.sourceDir)) {
@@ -46,13 +59,18 @@ export class SourceSyncWatcher {
     }
 
     this.handle = watchRecursive(this.sourceDir, relPath => this.queueChange(relPath), this.log);
-    this.log(`[sync] watching: ${this.sourceDir}`);
+    this.log(
+      `[sync] watching: ${this.sourceDir}${
+        this.trigger === 'onWindowBlur' ? ' (VSCode 창이 포커스를 잃을 때 반영)' : ''
+      }`
+    );
   }
 
   stop(): void {
     if (this.flushTimer) clearTimeout(this.flushTimer);
     this.handle?.close();
     this.handle = undefined;
+
   }
 
   /**
@@ -66,8 +84,22 @@ export class SourceSyncWatcher {
   private queueChange(relPath: string): void {
     if (!relPath) return;
     this.pending.add(relPath);
+    if (this.trigger === 'onWindowBlur') return; // accumulates until flushNow() is called externally
     if (this.flushTimer) clearTimeout(this.flushTimer);
     this.flushTimer = setTimeout(() => this.flushPending(), 250);
+  }
+
+  /** Immediately copies through whatever's accumulated so far. Called automatically by the
+   *  250ms debounce in 'onChange' mode; in 'onWindowBlur' mode this is the *only* thing that
+   *  triggers a copy, called from extension.ts's vscode.window.onDidChangeWindowState
+   *  listener whenever the VSCode window itself loses focus. Harmless (a no-op) if nothing's
+   *  pending. */
+  flushNow(): void {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = undefined;
+    }
+    this.flushPending();
   }
 
   private flushPending(): void {

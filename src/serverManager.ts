@@ -11,7 +11,7 @@ import {
   DEFAULT_HTTP_PORT,
   DEFAULT_DEBUG_PORT
 } from './model';
-import { SourceSyncWatcher } from './sourceSync';
+import { SourceSyncWatcher, SyncTrigger } from './sourceSync';
 import { JavaBuildSyncWatcher } from './javaBuildSync';
 import { findProjectRoot, detectBuildInfo } from './sourceOverlay';
 import { runBuildOnce } from './buildRunner';
@@ -94,6 +94,39 @@ export class ServerManager {
 
   getDefaultLogLevel(): string {
     return vscode.workspace.getConfiguration(CONFIG_SECTION).get<string>('defaultLogLevel', 'INFO');
+  }
+
+  /** When live-sync (JSP/static files and compiled classes) actually gets copied through to
+   *  the deployed app: 'onChange' (default) shortly after each save, or 'onWindowBlur' - not
+   *  until VSCode's own window loses focus (see flushAllPendingSyncs, called from
+   *  extension.ts's vscode.window.onDidChangeWindowState listener). */
+  getSyncTrigger(): SyncTrigger {
+    return vscode.workspace.getConfiguration(CONFIG_SECTION).get<SyncTrigger>('syncTrigger', 'onChange');
+  }
+
+  /** Flushes every currently-active sync watcher (both JSP/static and compiled-class) right
+   *  now, regardless of their individual debounce timers. The only thing that actually
+   *  applies a pending change in 'onWindowBlur' trigger mode - called whenever the VSCode
+   *  window loses focus. A no-op for any watcher that has nothing pending, so it's always
+   *  safe to call this unconditionally rather than tracking which servers are in which mode. */
+  flushAllPendingSyncs(): void {
+    for (const watcher of this.syncWatchers.values()) watcher.flushNow();
+    for (const watcher of this.buildWatchers.values()) watcher.flushNow();
+  }
+
+  /** Same as flushAllPendingSyncs(), but scoped to one server. Used before the hot-swap-
+   *  failure fallback issues a "Reload Context Now" - that reload just re-reads whatever
+   *  bytes currently sit in WEB-INF/classes, so if `syncTrigger` is 'onWindowBlur' and the
+   *  window never lost focus yet, the reload would otherwise silently pick up the *old*
+   *  class and look like the structural change (new field/method/class) never applied. */
+  flushPendingSyncsForServer(serverId: string): void {
+    const prefix = `${serverId}::`;
+    for (const [key, watcher] of this.syncWatchers) {
+      if (key.startsWith(prefix)) watcher.flushNow();
+    }
+    for (const [key, watcher] of this.buildWatchers) {
+      if (key.startsWith(prefix)) watcher.flushNow();
+    }
   }
 
   /** Whether attaching the Java debugger should steal focus to the Debug Console panel.
@@ -251,7 +284,7 @@ export class ServerManager {
   private startSourceSync(serverId: string, contextPath: string, overlayPath: string, docBase: string) {
     this.stopSourceSync(serverId, contextPath);
     const outputChannel = this.running.get(serverId)?.outputChannel;
-    const watcher = new SourceSyncWatcher(overlayPath, docBase, msg => outputChannel?.appendLine(msg));
+    const watcher = new SourceSyncWatcher(overlayPath, docBase, msg => outputChannel?.appendLine(msg), this.getSyncTrigger());
     watcher.start();
     this.syncWatchers.set(this.syncKey(serverId, contextPath), watcher);
   }
@@ -352,7 +385,7 @@ export class ServerManager {
     if (!watcher) {
       const outputChannel = this.running.get(serverId)?.outputChannel;
       const classesTargetDir = path.join(app.sourcePath, 'WEB-INF', 'classes');
-      watcher = new JavaBuildSyncWatcher(buildInfo, classesTargetDir, msg => outputChannel?.appendLine(msg));
+      watcher = new JavaBuildSyncWatcher(buildInfo, classesTargetDir, msg => outputChannel?.appendLine(msg), this.getSyncTrigger());
       watcher.start();
       this.buildWatchers.set(this.syncKey(serverId, contextPath), watcher);
     }
@@ -417,7 +450,7 @@ export class ServerManager {
 
     const outputChannel = outputChannelOverride ?? this.running.get(serverId)?.outputChannel;
     const classesTargetDir = path.join(docBase, 'WEB-INF', 'classes');
-    const watcher = new JavaBuildSyncWatcher(buildInfo, classesTargetDir, msg => outputChannel?.appendLine(msg));
+    const watcher = new JavaBuildSyncWatcher(buildInfo, classesTargetDir, msg => outputChannel?.appendLine(msg), this.getSyncTrigger());
     watcher.start();
     this.buildWatchers.set(this.syncKey(serverId, contextPath), watcher);
 

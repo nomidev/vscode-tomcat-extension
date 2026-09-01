@@ -2,7 +2,7 @@
   "name": "vscode-tomcat",
   "displayName": "Tomcat for VSCode",
   "description": "Local Apache Tomcat integration for VSCode: register servers, deploy WAR/exploded apps, start/stop/debug, live JSP/Java reload, and view console logs.",
-  "version": "0.16.7",
+  "version": "0.16.9",
   "publisher": "local-dev",
   "repository": {
     "type": "git",
@@ -104,6 +104,16 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "켜면(기본값) 디버그 모드에서 Java 저장 시 핫스왑(코드 교체)이 실패한 것으로 보이면, 알림만 띄우고 끝내는 대신 그 서버의 라이브 리로드가 켜진 앱들에 **자동으로 \"Reload Context Now\" 를 실행**합니다. 핫스왑은 대형/복잡한 프로젝트일수록 불안정해지는 JVM 자체의 알려진 한계라, 매번 수동으로 리로드 버튼을 누르지 않아도 항상 확실하게 반영되도록 하기 위함입니다. 끄면 알림만 뜨고 직접 \"Reload Context Now\" 를 눌러야 합니다."
+        },
+        "tomcat.syncTrigger": {
+          "type": "string",
+          "enum": ["onChange", "onWindowBlur"],
+          "enumDescriptions": [
+            "저장 직후(짧은 디바운스 후) 바로 JSP/정적 파일 및 컴파일된 클래스를 배포된 앱으로 복사합니다.",
+            "저장해도 바로 복사하지 않고, VSCode 창 자체가 포커스를 잃을 때(예: 브라우저로 전환해서 확인할 때)까지 변경사항을 모아뒀다가 그 시점에 한 번에 복사합니다. IntelliJ의 'Upload changed files automatically ... On frame deactivation' 과 같은 방식입니다."
+          ],
+          "default": "onChange",
+          "markdownDescription": "라이브 소스 싱크(JSP/정적 파일, 컴파일된 클래스)가 배포된 앱에 실제로 언제 반영될지 정합니다. `onChange`(기본값)는 저장할 때마다 바로 반영하고, `onWindowBlur`는 VSCode 창이 포커스를 잃는 순간까지 모아뒀다가 반영합니다. **핫스왑(디버거의 즉시 코드 교체)에는 영향이 없습니다** — 핫스왑은 이 복사와 무관하게 항상 즉시 적용됩니다. 습관적으로 자주 저장하는 경우 불필요한 복사/리로드 트리거를 줄이는 용도입니다."
         },
         "tomcat.hotSwapFallbackTrigger": {
           "type": "string",

@@ -44,6 +44,12 @@ export function activate(context: vscode.ExtensionContext) {
   // (on by default) automatically calls it for every live-reload-enabled app on that server:
   // when hot-swap works, it's the fast silent path; when it doesn't, changes still always
   // end up reflected without needing to notice the failure and intervene by hand.
+  context.subscriptions.push(
+    vscode.window.onDidChangeWindowState(state => {
+      if (!state.focused) manager.flushAllPendingSyncs();
+    })
+  );
+
   const debugSessionServers = new Map<string, TomcatServerConfig>();
   const hotSwapFallbackTimers = new Map<string, ReturnType<typeof setTimeout>>();
   // Only used when tomcat.hotSwapFallbackTrigger is 'onResume': the set of contextPaths queued
@@ -237,6 +243,14 @@ export function activate(context: vscode.ExtensionContext) {
     if (status !== 'running' && status !== 'debugging') {
       return; // nothing to do - a fresh start will already pick up the current context.xml
     }
+
+    // Reload Context Now just re-reads whatever bytes are currently sitting in
+    // WEB-INF/classes/docBase - if tomcat.syncTrigger is 'onWindowBlur' and the window
+    // hasn't lost focus since the edit, those could still be the *old* files. Force the copy
+    // through right now regardless of that setting, whoever is calling this (the manual
+    // button, auto-reload toggle, or the hot-swap-failure fallback) - otherwise a reload can
+    // silently pick up stale code and look like the change never applied.
+    manager.flushPendingSyncsForServer(server.id);
 
     if (!hasManagerApp(server.homePath)) {
       vscode.window.showWarningMessage(

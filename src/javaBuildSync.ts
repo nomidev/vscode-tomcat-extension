@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { watchRecursive, copyDirRecursive, filesAreIdentical, RecursiveWatchHandle } from './recursiveWatch';
 import { BuildInfo } from './sourceOverlay';
+import { SyncTrigger } from './sourceSync';
 
 type Logger = (message: string) => void;
 
@@ -22,10 +23,12 @@ type Logger = (message: string) => void;
  * extension), Tomcat's own background thread then reloads the context automatically once it
  * notices the class/resource change - no restart, no button. An attached Java debugger
  * (JPDA) may also hot-swap method-body-only changes directly into the running JVM even
- * faster, without needing a reload at all. Structural changes a debugger can't hot-swap
- * (new fields, new methods, new classes) still need that context reload (automatic) or, for
- * some frameworks that cache things more aggressively, a manual "Reload Context Now" /
- * restart - which is expected and fine.
+ * faster, without needing a reload at all - that path talks to the JVM directly and doesn't
+ * depend on this watcher's copy, so deferring the copy (see SyncTrigger) never delays
+ * hot-swap itself. Structural changes a debugger can't hot-swap (new fields, new methods, new
+ * classes) still need that context reload (automatic) or, for some frameworks that cache
+ * things more aggressively, a manual "Reload Context Now" / restart - which is expected and
+ * fine.
  */
 export class JavaBuildSyncWatcher {
   private handles: RecursiveWatchHandle[] = [];
@@ -36,13 +39,18 @@ export class JavaBuildSyncWatcher {
   constructor(
     private buildInfo: BuildInfo,
     private classesTargetDir: string,
-    private log: Logger = () => {}
+    private log: Logger = () => {},
+    private trigger: SyncTrigger = 'onChange'
   ) {}
 
   /** Timestamp (Date.now()) of the last time this watcher actually copied or removed a file -
    *  i.e. the last time this app's compiled output genuinely changed. undefined if it never
    *  has. Used to narrow "which app(s) does this hot-swap failure actually belong to" down
-   *  from "every live-synced app on the server" to "the one(s) whose code just changed". */
+   *  from "every live-synced app on the server" to "the one(s) whose code just changed".
+   *  Note: in 'onWindowBlur' trigger mode this only updates when the window actually loses
+   *  focus, not right after each save - the hot-swap-failure fallback's "recently changed"
+   *  window may miss apps that changed but haven't flushed yet in that mode, falling back to
+   *  reloading every live app instead (safe, just broader). */
   getLastSyncAt(): number | undefined {
     return this.lastSyncAt;
   }
@@ -61,7 +69,11 @@ export class JavaBuildSyncWatcher {
       this.syncAll(dir);
       this.handles.push(watchRecursive(dir, relPath => this.queueChange(dir, relPath), this.log));
     }
-    this.log(`[classes-sync] watching: ${dirs.join(', ')} -> ${this.classesTargetDir}`);
+    this.log(
+      `[classes-sync] watching: ${dirs.join(', ')} -> ${this.classesTargetDir}${
+        this.trigger === 'onWindowBlur' ? ' (VSCode 창이 포커스를 잃을 때 반영)' : ''
+      }`
+    );
   }
 
   stop(): void {
@@ -106,8 +118,22 @@ export class JavaBuildSyncWatcher {
   private queueChange(outDir: string, relPath: string): void {
     if (!relPath) return;
     this.pending.set(relPath, outDir);
+    if (this.trigger === 'onWindowBlur') return; // accumulates until flushNow() is called externally
     if (this.flushTimer) clearTimeout(this.flushTimer);
     this.flushTimer = setTimeout(() => this.flushPending(), 250);
+  }
+
+  /** Immediately copies through whatever's accumulated so far. Called automatically by the
+   *  250ms debounce in 'onChange' mode; in 'onWindowBlur' mode this is the *only* thing that
+   *  triggers a copy, called from extension.ts's vscode.window.onDidChangeWindowState
+   *  listener whenever the VSCode window itself loses focus. Harmless (a no-op) if nothing's
+   *  pending. */
+  flushNow(): void {
+    if (this.flushTimer) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = undefined;
+    }
+    this.flushPending();
   }
 
   private flushPending(): void {
