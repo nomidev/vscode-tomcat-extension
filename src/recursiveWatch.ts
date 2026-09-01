@@ -81,3 +81,24 @@ export function copyDirRecursive(src: string, dest: string): void {
     }
   }
 }
+
+/**
+ * Whether src and dest are byte-for-byte identical (dest missing counts as "not identical").
+ * Used by the incremental watchers (SourceSyncWatcher, JavaBuildSyncWatcher) to skip the
+ * actual copy - and the log line/reload-trigger side effects that come with it - when a save
+ * didn't really change the file's content. Habitually hitting Ctrl+S (or a build tool
+ * touching a file's mtime without changing its bytes) shouldn't count as a real change: the
+ * size check first makes the common "genuinely changed" case cheap, and the full byte
+ * comparison only runs on the same-size case, which for source/class/JSP-sized files is fast
+ * enough not to matter.
+ */
+export function filesAreIdentical(src: string, dest: string): boolean {
+  try {
+    const srcStat = fs.statSync(src);
+    const destStat = fs.statSync(dest);
+    if (srcStat.size !== destStat.size) return false;
+    return fs.readFileSync(src).equals(fs.readFileSync(dest));
+  } catch {
+    return false;
+  }
+}

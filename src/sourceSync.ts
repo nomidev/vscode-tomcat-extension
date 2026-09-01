@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { watchRecursive, copyDirRecursive, RecursiveWatchHandle } from './recursiveWatch';
+import { watchRecursive, copyDirRecursive, filesAreIdentical, RecursiveWatchHandle } from './recursiveWatch';
 
 type Logger = (message: string) => void;
 
@@ -77,6 +77,7 @@ export class SourceSyncWatcher {
 
     let copied = 0;
     let removed = 0;
+    let skipped = 0;
     const errors: string[] = [];
 
     for (const relPath of relPaths) {
@@ -87,6 +88,11 @@ export class SourceSyncWatcher {
           const stat = fs.statSync(src);
           if (stat.isDirectory()) {
             fs.mkdirSync(dest, { recursive: true });
+          } else if (fs.existsSync(dest) && filesAreIdentical(src, dest)) {
+            // Habitual Ctrl+S with no real change, or a build tool re-touching mtime without
+            // changing bytes - nothing to actually copy, so skip it (and the log line/JSP
+            // recompile/reload trigger that would otherwise follow).
+            skipped++;
           } else {
             fs.mkdirSync(path.dirname(dest), { recursive: true });
             fs.copyFileSync(src, dest);

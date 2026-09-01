@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { watchRecursive, copyDirRecursive, RecursiveWatchHandle } from './recursiveWatch';
+import { watchRecursive, copyDirRecursive, filesAreIdentical, RecursiveWatchHandle } from './recursiveWatch';
 import { BuildInfo } from './sourceOverlay';
 
 type Logger = (message: string) => void;
@@ -117,6 +117,7 @@ export class JavaBuildSyncWatcher {
 
     let copied = 0;
     let removed = 0;
+    let skipped = 0;
     const errors: string[] = [];
 
     for (const [relPath, outDir] of entries) {
@@ -127,6 +128,12 @@ export class JavaBuildSyncWatcher {
           const stat = fs.statSync(src);
           if (stat.isDirectory()) {
             fs.mkdirSync(dest, { recursive: true });
+          } else if (fs.existsSync(dest) && filesAreIdentical(src, dest)) {
+            // Habitual Ctrl+S with no real change, or an IDE/build tool re-touching mtime
+            // without changing bytes - nothing to actually copy. Importantly, this also
+            // keeps lastSyncAt (used by the hot-swap-failure fallback to pick which app(s)
+            // to reload) from firing on saves that didn't really change anything.
+            skipped++;
           } else {
             fs.mkdirSync(path.dirname(dest), { recursive: true });
             fs.copyFileSync(src, dest);
