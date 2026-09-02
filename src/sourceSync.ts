@@ -99,14 +99,21 @@ export class SourceSyncWatcher {
       clearTimeout(this.flushTimer);
       this.flushTimer = undefined;
     }
-    // Don't rely solely on `pending` here: it's only populated once the fs watcher actually
-    // reports a change, which can lag behind the write itself (a compile finishing, a save
-    // landing on disk) by anywhere from a few ms to noticeably longer depending on the OS/FS.
-    // If the person saves and immediately alt-tabs to the browser, this flush can otherwise
-    // race ahead of that event and find `pending` empty, silently missing the change until
-    // the *next* blur. A full-tree diff at flush time closes that race for good - it's only
-    // called on blur (infrequent), so the extra walk is cheap where it matters.
-    if (fs.existsSync(this.sourceDir)) {
+    // The full-tree reconciliation below exists only to close a race specific to
+    // 'onWindowBlur' mode (see its doc comment). In 'onChange' mode, the 250ms debounce
+    // timer already keeps `pending` accurate on its own - this method is still called from
+    // ensureContextReloaded() before every reload regardless of trigger mode, so doing the
+    // full walk unconditionally here would mean paying for a full directory scan + byte
+    // comparison of every file on every single reload/hot-swap-fallback, even though
+    // 'onChange' mode has nothing to catch up on. That's a real, avoidable slowdown -
+    // restrict it to the one mode that actually needs it.
+    if (this.trigger === 'onWindowBlur' && fs.existsSync(this.sourceDir)) {
+      // Don't rely solely on `pending` here: it's only populated once the fs watcher
+      // actually reports a change, which can lag behind the write itself (a save landing on
+      // disk) by anywhere from a few ms to noticeably longer depending on the OS/FS. If the
+      // person saves and immediately alt-tabs to the browser, this flush can otherwise race
+      // ahead of that event and find `pending` empty, silently missing the change until the
+      // *next* blur. A full-tree diff at flush time closes that race for good.
       for (const relPath of listAllFiles(this.sourceDir)) this.pending.add(relPath);
     }
     this.flushPending();
