@@ -46,7 +46,14 @@ export function activate(context: vscode.ExtensionContext) {
   // end up reflected without needing to notice the failure and intervene by hand.
   context.subscriptions.push(
     vscode.window.onDidChangeWindowState(state => {
-      if (!state.focused) manager.flushAllPendingSyncs();
+      if (!state.focused) {
+        // A short grace period, not an immediate flush: if the person saves and instantly
+        // alt-tabs, the incremental compile/write that the save triggered may not have
+        // landed on disk yet, so flushing this very instant could find nothing new to copy.
+        // Waiting briefly lets that catch up and land in `pending` normally - far cheaper
+        // than re-scanning every file to compensate (see flushNow()'s doc comment).
+        setTimeout(() => manager.flushAllPendingSyncs(), 600);
+      }
     })
   );
 
@@ -75,11 +82,40 @@ export function activate(context: vscode.ExtensionContext) {
     );
   }
 
+  const warnedHotCodeReplaceServers = new Set<string>();
+
   context.subscriptions.push(
     vscode.debug.onDidStartDebugSession(session => {
       const server = manager.getServers().find(s => session.name === `Attach to ${s.name}`);
       if (server) {
         debugSessionServers.set(session.id, server);
+
+        // Everything in this file about hot-swap failures/fallback only ever fires in
+        // response to an *attempted* hot-swap - and vscode-java-debug only actually attempts
+        // one (its own BUILD_COMPLETE handler calls the 'redefineClasses' request) when
+        // java.debug.settings.hotCodeReplace is 'auto'. It defaults to 'manual', in which
+        // case saves compile but nothing ever gets pushed to the JVM until the person
+        // manually triggers it from the Debug toolbar - so with the default setting, none of
+        // this extension's hot-swap-aware features (the failure notification, the
+        // auto-reload fallback) ever have anything to react to, which looks exactly like
+        // "nothing happens when I save" with no obvious cause. Nag about it once per
+        // VSCode session (not every debug start) rather than silently doing nothing.
+        const hotCodeReplace = vscode.workspace.getConfiguration('java.debug.settings').get<string>('hotCodeReplace');
+        if (hotCodeReplace !== 'auto' && !warnedHotCodeReplaceServers.has(server.id)) {
+          warnedHotCodeReplaceServers.add(server.id);
+          vscode.window
+            .showWarningMessage(
+              `"${server.name}": java.debug.settings.hotCodeReplace 가 "${hotCodeReplace ?? 'manual'}" 로 되어 있어, ` +
+                '저장해도 핫스왑(코드 교체)이 자동으로 시도되지 않습니다. 이 상태에서는 핫스왑 실패 감지·자동 리로드 등 ' +
+                '이 확장의 관련 기능도 반응할 일이 없습니다. "auto"로 바꾸는 걸 권장합니다.',
+              '설정 열기'
+            )
+            .then(choice => {
+              if (choice === '설정 열기') {
+                vscode.commands.executeCommand('workbench.action.openSettings', 'java.debug.settings.hotCodeReplace');
+              }
+            });
+        }
       }
     })
   );
@@ -119,9 +155,17 @@ export function activate(context: vscode.ExtensionContext) {
       channel?.appendLine(`[debug] custom event: ${e.event} ${JSON.stringify(e.body ?? {})}`);
 
       const eventName = (e.event ?? '').toLowerCase();
-      const bodyText = JSON.stringify(e.body ?? {}).toLowerCase();
       const mentionsHotSwap = eventName.includes('hotcodereplace') || eventName.includes('hotswap');
-      const mentionsFailure = eventName.includes('error') || /error|fail/.test(bodyText);
+      // Match vscode-java-debug's own logic exactly (see its hotCodeReplace.ts,
+      // handleHotCodeReplaceCustomEvent): it treats changeType ERROR *and* WARNING as failure
+      // - both trigger its own "Would you like to restart the debug session?" prompt. Our
+      // earlier regex over JSON.stringify(body) only ever matched "error"/"fail", so a
+      // WARNING event (a real, actively-used value - not just one we were being defensive
+      // about) would trigger that VSCode-side prompt while our fallback stayed silent.
+      // Checking the actual field is also just more correct than pattern-matching stringified
+      // JSON.
+      const changeType = String((e.body as { changeType?: string } | undefined)?.changeType ?? '').toUpperCase();
+      const mentionsFailure = changeType === 'ERROR' || changeType === 'WARNING';
       if (!mentionsHotSwap || !mentionsFailure) return;
 
       const autoReload = vscode.workspace
@@ -245,11 +289,16 @@ export function activate(context: vscode.ExtensionContext) {
     }
 
     // Reload Context Now just re-reads whatever bytes are currently sitting in
-    // WEB-INF/classes/docBase - if tomcat.syncTrigger is 'onWindowBlur' and the window
-    // hasn't lost focus since the edit, those could still be the *old* files. Force the copy
-    // through right now regardless of that setting, whoever is calling this (the manual
-    // button, auto-reload toggle, or the hot-swap-failure fallback) - otherwise a reload can
-    // silently pick up stale code and look like the change never applied.
+    // WEB-INF/classes/docBase - if tomcat.syncTrigger is 'onWindowBlur', a very recent edit's
+    // compile/write might not have landed yet even though nothing after it changed focus.
+    // A short grace period (not a full-tree re-scan - see flushNow()'s doc comment) gives
+    // that time to catch up before we force the flush, so the reload never picks up stale
+    // files. Skipped in the default 'onChange' mode, which doesn't need it (its own 250ms
+    // debounce already keeps things current) and where adding a delay to every single reload
+    // would be pure overhead.
+    if (manager.getSyncTrigger() === 'onWindowBlur') {
+      await new Promise(resolve => setTimeout(resolve, 600));
+    }
     manager.flushPendingSyncsForServer(server.id);
 
     if (!hasManagerApp(server.homePath)) {

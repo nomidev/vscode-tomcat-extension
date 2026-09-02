@@ -68,9 +68,7 @@ export function safeReadDir(dir: string): fs.Dirent[] {
   }
 }
 
-/** Recursively lists every file (not directory) under dir, as paths relative to dir. Used for
- *  the full-tree reconciliation an 'onWindowBlur' flush does - see filesAreIdentical's doc
- *  comment for why relying on already-arrived fs-watch events alone isn't reliable there. */
+/** Recursively lists every file (not directory) under dir, as paths relative to dir. */
 export function listAllFiles(dir: string, relPrefix = ''): string[] {
   const result: string[] = [];
   for (const entry of safeReadDir(dir)) {

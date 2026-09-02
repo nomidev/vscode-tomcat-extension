@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.16.14
+- **핫스왑 실패 감지가 `changeType: "WARNING"`을 놓치고 있던 문제 수정**: 공식 vscode-java-debug 소스를 확인해보니, "Would you like to restart the debug session?" 팝업은 `changeType`이 `ERROR`뿐 아니라 `WARNING`일 때도 뜹니다. 우리 쪽 감지는 이벤트 본문을 문자열화해서 `/error|fail/` 정규식으로만 판단하고 있어서, `WARNING`인 경우엔 그 단어가 안 걸려 VSCode는 팝업을 띄우는데 우리 fallback은 조용히 반응을 안 하는 구멍이 있었습니다. 이제 정규식 추측 대신 실제 `changeType` 필드를 `ERROR`/`WARNING`과 직접 비교합니다(공식 확장의 판단 로직과 동일).
+- **`java.debug.settings.hotCodeReplace` 가 `auto`가 아니면 디버그 세션 시작 시 알려주는 안내 추가**: 이 설정의 기본값은 `manual`인데, 이 상태에선 vscode-java-debug 자체가 클래스를 재정의하는 실제 시도를 안 해서(저장 시 컴파일만 되고 JVM엔 아무것도 안 밀어넣음) 이 확장의 핫스왑 실패 감지·자동 리로드 기능이 반응할 이벤트 자체가 없습니다. "저장해도 아무 일도 안 일어난다"처럼 보이는 흔한 원인이라, 디버그 세션이 이 확장의 서버에 붙을 때 `auto`가 아니면 (VSCode 세션당 서버별로 한 번만) 알려주고 설정을 바로 열 수 있는 버튼을 제공합니다.
+
+## 0.16.13
+- **`onWindowBlur`의 "전체 파일 재훑기"를 짧은 유예 시간(600ms) 방식으로 교체**: 0.16.10~0.16.12에서는 blur 시점의 레이스(저장 직후 바로 창을 벗어나면 컴파일/기록이 아직 안 끝났을 수 있는 문제)를 막으려고 매번 전체 디렉토리를 다시 훑어 바이트 단위로 비교했습니다. 이 방식은 확실하지만 매번 프로젝트 전체 파일을 읽는 비용이 들었습니다. 레이스의 본질은 결국 타이밍 문제라, 이제는 flush 직전에 0.6초만 기다렸다가(그동안 fs 감시 이벤트가 정상적으로 `pending`에 쌓이도록) 그 결과만 가볍게 반영합니다. 기본값인 `onChange` 모드에는 이 유예 시간이 아예 붙지 않아 영향이 없고(`hotSwapFallbackTrigger` 등 리로드 전 강제 flush도 마찬가지로 `syncTrigger`가 `onWindowBlur`일 때만 유예 시간이 붙습니다), `onWindowBlur` 모드도 전체 스캔 대신 훨씬 가벼워졌습니다.
+
 ## 0.16.12
 - **핫스왑 실패 fallback/수동 리로드가 (기본값인 `onChange` 모드에서도) 매번 전체 파일을 다시 훑느라 느려지던 문제 수정**: 0.16.9에서 `ensureContextReloaded`(자동 fallback·수동 "Reload Context Now"·Toggle Auto Reload 전부 포함)가 리로드 직전에 각 서버의 동기화 watcher를 강제로 flush하도록 고쳤는데, 그 flush가 트리거 모드와 무관하게 0.16.10의 "전체 디렉토리 재훑기+바이트 비교" 로직을 항상 실행하고 있었습니다. `onWindowBlur`의 레이스를 막으려던 로직이 정작 아무 문제 없는 기본 `onChange` 모드에서도 리로드/핫스왑 실패가 날 때마다 프로젝트 전체 파일(수백 개)을 다시 비교하게 만들어, 체감 속도 저하의 원인이었습니다. 이제 전체 재훑기는 실제로 그게 필요한 `onWindowBlur` 모드일 때만 실행되고, 기본 `onChange` 모드에서는 원래처럼 가볍게 처리됩니다.
 

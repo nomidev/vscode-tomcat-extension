@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { watchRecursive, copyDirRecursive, filesAreIdentical, listAllFiles, RecursiveWatchHandle } from './recursiveWatch';
+import { watchRecursive, copyDirRecursive, filesAreIdentical, RecursiveWatchHandle } from './recursiveWatch';
 import { BuildInfo } from './sourceOverlay';
 import { SyncTrigger } from './sourceSync';
 
@@ -123,36 +123,23 @@ export class JavaBuildSyncWatcher {
     this.flushTimer = setTimeout(() => this.flushPending(), 250);
   }
 
-  /** Immediately copies through whatever's accumulated so far. Called automatically by the
-   *  250ms debounce in 'onChange' mode; in 'onWindowBlur' mode this is the *only* thing that
-   *  triggers a copy, called from extension.ts's vscode.window.onDidChangeWindowState
-   *  listener whenever the VSCode window itself loses focus. Harmless (a no-op) if nothing's
+  /** Immediately copies through whatever's accumulated so far in `pending`. Called
+   *  automatically by the 250ms debounce in 'onChange' mode; in 'onWindowBlur' mode this is
+   *  the only thing that triggers a copy - called (after a short grace delay, from the
+   *  caller) from extension.ts's vscode.window.onDidChangeWindowState listener, and from
+   *  ensureContextReloaded() before every reload so a reload never picks up stale classes
+   *  regardless of trigger mode. Deliberately does NOT re-scan classesOutDirs here - an
+   *  earlier version did, to close the race where a save's compile/write hadn't finished yet
+   *  when this fires, but that meant a full directory walk + byte-for-byte comparison of
+   *  every compiled class/resource on every call, which is real, needless overhead when
+   *  nothing actually changed (the common case, especially before a reload). The race is
+   *  better closed by waiting briefly before calling this (see extension.ts) than by
+   *  brute-forcing a full comparison after the fact. Harmless (a no-op) if nothing's
    *  pending. */
   flushNow(): void {
     if (this.flushTimer) {
       clearTimeout(this.flushTimer);
       this.flushTimer = undefined;
-    }
-    // The full-tree reconciliation below exists only to close a race specific to
-    // 'onWindowBlur' mode (see its doc comment). In 'onChange' mode, the 250ms debounce
-    // timer already keeps `pending` accurate on its own - this method is also called from
-    // ensureContextReloaded() before every reload regardless of trigger mode, so doing the
-    // full walk unconditionally here would mean paying for a full directory scan + byte
-    // comparison of every compiled class/resource on every single reload/hot-swap-fallback,
-    // even in the default mode that has nothing to catch up on. That's a real, avoidable
-    // slowdown (and exactly what made hot-swap-fallback reloads feel sluggish) - restrict it
-    // to the one mode that actually needs it.
-    if (this.trigger === 'onWindowBlur') {
-      // Don't rely solely on `pending` here: it's only populated once the fs watcher
-      // actually reports a change, which can lag behind the write itself (a compile
-      // finishing) by anywhere from a few ms to noticeably longer depending on the OS/FS. If
-      // the person saves and immediately alt-tabs to the browser, this flush can otherwise
-      // race ahead of that event and find `pending` empty, silently missing the change until
-      // the *next* blur. A full-tree diff at flush time closes that race for good.
-      for (const outDir of this.buildInfo.classesOutDirs) {
-        if (!fs.existsSync(outDir)) continue;
-        for (const relPath of listAllFiles(outDir)) this.pending.set(relPath, outDir);
-      }
     }
     this.flushPending();
   }
@@ -165,10 +152,8 @@ export class JavaBuildSyncWatcher {
     let copied = 0;
     let removed = 0;
     let skipped = 0;
-    const touched: string[] = []; // only what was actually copied/removed - NOT the full
-    // entries list, which in 'onWindowBlur' mode's full-tree reconciliation can be every
-    // class/resource file in the project even though almost all of them get skipped as
-    // unchanged.
+    const touched: string[] = []; // only what was actually copied/removed, for an accurate
+    // log sample - NOT the full entries list, since most of it may get skipped as unchanged.
     const errors: string[] = [];
 
     for (const [relPath, outDir] of entries) {
