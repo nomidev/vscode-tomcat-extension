@@ -155,6 +155,10 @@ export class JavaBuildSyncWatcher {
     let copied = 0;
     let removed = 0;
     let skipped = 0;
+    const touched: string[] = []; // only what was actually copied/removed - NOT the full
+    // entries list, which in 'onWindowBlur' mode's full-tree reconciliation can be every
+    // class/resource file in the project even though almost all of them get skipped as
+    // unchanged.
     const errors: string[] = [];
 
     for (const [relPath, outDir] of entries) {
@@ -175,10 +179,12 @@ export class JavaBuildSyncWatcher {
             fs.mkdirSync(path.dirname(dest), { recursive: true });
             fs.copyFileSync(src, dest);
             copied++;
+            touched.push(relPath);
           }
         } else if (fs.existsSync(dest)) {
           fs.rmSync(dest, { recursive: true, force: true });
           removed++;
+          touched.push(relPath);
         }
       } catch (err) {
         errors.push(`${relPath}: ${err}`);
@@ -188,8 +194,7 @@ export class JavaBuildSyncWatcher {
     if (copied || removed) {
       this.lastSyncAt = Date.now();
       const summary = [copied && `${copied}개 복사`, removed && `${removed}개 삭제`].filter(Boolean).join(', ');
-      const relPaths = entries.map(([p]) => p);
-      const sample = relPaths.slice(0, 3).join(', ') + (relPaths.length > 3 ? ` 외 ${relPaths.length - 3}개` : '');
+      const sample = touched.slice(0, 3).join(', ') + (touched.length > 3 ? ` 외 ${touched.length - 3}개` : '');
       this.log(`[classes-sync] ${summary} - ${sample}`);
     }
     for (const err of errors) {
