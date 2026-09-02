@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { watchRecursive, copyDirRecursive, filesAreIdentical, RecursiveWatchHandle } from './recursiveWatch';
+import { watchRecursive, copyDirRecursive, filesAreIdentical, listAllFiles, RecursiveWatchHandle } from './recursiveWatch';
 import { BuildInfo } from './sourceOverlay';
 import { SyncTrigger } from './sourceSync';
 
@@ -132,6 +132,17 @@ export class JavaBuildSyncWatcher {
     if (this.flushTimer) {
       clearTimeout(this.flushTimer);
       this.flushTimer = undefined;
+    }
+    // Don't rely solely on `pending` here: it's only populated once the fs watcher actually
+    // reports a change, which can lag behind the write itself (a compile finishing) by
+    // anywhere from a few ms to noticeably longer depending on the OS/FS. If the person saves
+    // and immediately alt-tabs to the browser, this flush can otherwise race ahead of that
+    // event and find `pending` empty, silently missing the change until the *next* blur. A
+    // full-tree diff at flush time closes that race for good - it's only called on blur
+    // (infrequent), so the extra walk is cheap where it matters.
+    for (const outDir of this.buildInfo.classesOutDirs) {
+      if (!fs.existsSync(outDir)) continue;
+      for (const relPath of listAllFiles(outDir)) this.pending.set(relPath, outDir);
     }
     this.flushPending();
   }

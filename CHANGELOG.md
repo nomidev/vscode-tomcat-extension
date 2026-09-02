@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.16.10
+- **`tomcat.syncTrigger: "onWindowBlur"` 에서 저장 직후 바로 브라우저로 전환하면 sync가 씹히던 레이스 수정**: 지금까지 `flushNow()`는 fs 감시자가 이미 보고한 `pending` 목록만 복사했는데, 컴파일 완료(디스크 기록)가 창 포커스를 잃는 순간보다 늦게 끝나면 그 시점엔 `pending`이 비어 있어 아무것도 복사하지 못했습니다. hotcodereplace(디버거가 JVM에 직접 붙는 것)는 이 레이스와 무관해서 정상적으로 뜨는데, 파일 복사만 조용히 놓치고 다음 blur까지 미뤄지는 게 원인이었습니다. 이제 blur로 flush될 때는 감시 이벤트를 믿는 대신 **디렉토리를 직접 다시 훑어서(전체 트리 비교) 실제로 달라진 파일만 복사**하므로, 이 레이스 자체가 없어집니다. (0.16.7의 "내용 같으면 스킵" 로직 덕분에, 전체를 다시 훑어도 실제로 바뀐 파일만 복사되어 비용 부담은 없습니다.)
+
 ## 0.16.9
 - **`tomcat.syncTrigger: "onWindowBlur"` 상태에서 Reload Context Now(자동/수동 모두)가 옛날 클래스를 리로드할 수 있던 문제 수정**: 메서드 본문 변경은 디버거가 JVM에 직접 붙는 JDWP 핫스왑이라 `syncTrigger` 설정과 무관하게 항상 즉시 반영되지만, 필드/메서드 추가 같은 구조적 변경은 핫스왑이 실패하고 "Reload Context Now"로 폴백합니다. 이 리로드는 WEB-INF/classes에 **실제로 있는 파일**을 다시 읽는 것뿐이라, `onWindowBlur`를 켜둔 상태로 아직 창 포커스를 잃지 않았다면 새 클래스가 복사되기 전이라 리로드해도 옛날 코드 그대로였습니다. 이제 `ensureContextReloaded`(자동 fallback·수동 "Reload Context Now"·Toggle Auto Reload 전부 포함)가 리로드 직전에 그 서버의 대기 중인 동기화를 `syncTrigger` 설정과 무관하게 강제로 먼저 흘려보내서, 리로드는 항상 최신 코드를 반영합니다.
 
