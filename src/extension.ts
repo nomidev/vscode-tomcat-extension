@@ -48,11 +48,17 @@ export function activate(context: vscode.ExtensionContext) {
     vscode.window.onDidChangeWindowState(state => {
       if (!state.focused) {
         // A short grace period, not an immediate flush: if the person saves and instantly
-        // alt-tabs, the incremental compile/write that the save triggered may not have
-        // landed on disk yet, so flushing this very instant could find nothing new to copy.
-        // Waiting briefly lets that catch up and land in `pending` normally - far cheaper
-        // than re-scanning every file to compensate (see flushNow()'s doc comment).
-        setTimeout(() => manager.flushAllPendingSyncs(), 600);
+        // alt-tabs, the write that save triggered (or, for a .java file, the compile it
+        // kicks off) may not have landed on disk yet, so flushing this very instant could
+        // find nothing new to copy. A single fixed delay is a guess, though - a plain-text
+        // save (e.g. a .jsp) can be near-instant, so someone who reflexively alt-tabs right
+        // after Ctrl+S can still beat one delay; a .class file's compile can also just take
+        // longer than expected. Flushing a few times at increasing delays instead of once
+        // closes that race far more reliably - each flush is a cheap no-op once nothing new
+        // has arrived since the last one, so this costs essentially nothing extra.
+        for (const delayMs of [300, 800, 2000]) {
+          setTimeout(() => manager.flushAllPendingSyncs(), delayMs);
+        }
       }
     })
   );
