@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { watchRecursive, copyDirRecursive, filesAreIdentical, RecursiveWatchHandle } from './recursiveWatch';
+import { watchRecursive, filesAreIdentical, listAllFiles, RecursiveWatchHandle } from './recursiveWatch';
 
 type Logger = (message: string) => void;
 
@@ -51,12 +51,16 @@ export class SourceSyncWatcher {
       return;
     }
 
-    this.log(`[sync] initial copy: ${this.sourceDir} -> ${this.targetDir}`);
-    try {
-      copyDirRecursive(this.sourceDir, this.targetDir);
-    } catch (err) {
-      this.log(`[sync] initial copy error: ${err}`);
-    }
+    // Route the initial sync through the exact same path as every incremental change
+    // (queue every file, let flushPending() skip whatever's already identical and log
+    // whatever it actually copies) rather than an unconditional bulk copy. This matters
+    // beyond just the first-ever start(): this method re-runs any time the watcher is
+    // recreated for an already-deployed app (e.g. Toggle Auto Context Reload, updating the
+    // source overlay path) - with the old unconditional copyDirRecursive, that silently
+    // re-copied every file with no per-file count or [sync] log line, which looked
+    // indistinguishable from nothing happening even though the files were, in fact, current.
+    for (const relPath of listAllFiles(this.sourceDir)) this.pending.add(relPath);
+    this.flushPending();
 
     this.handle = watchRecursive(this.sourceDir, relPath => this.queueChange(relPath), this.log);
     this.log(

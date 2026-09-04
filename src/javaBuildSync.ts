@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { watchRecursive, copyDirRecursive, filesAreIdentical, RecursiveWatchHandle } from './recursiveWatch';
+import { watchRecursive, filesAreIdentical, listAllFiles, RecursiveWatchHandle } from './recursiveWatch';
 import { BuildInfo } from './sourceOverlay';
 import { SyncTrigger } from './sourceSync';
 
@@ -97,9 +97,16 @@ export class JavaBuildSyncWatcher {
 
   private syncAll(outDir: string): boolean {
     if (!fs.existsSync(outDir)) return true; // nothing to sync yet isn't a failure
+    // Queue every file under outDir and let flushPending() do the actual copying - it already
+    // skips whatever's byte-identical and logs whatever it actually touches. This matters
+    // beyond the very first start(): syncAll() also backs "Force Resync Classes Now" and
+    // re-runs any time this watcher is recreated for an already-deployed app (e.g. Toggle
+    // Auto Context Reload). The old unconditional copyDirRecursive re-copied every file with
+    // no per-file count or [classes-sync] log line on every one of those re-runs, which
+    // looked indistinguishable from nothing happening even though the files were current.
+    for (const relPath of listAllFiles(outDir)) this.pending.set(relPath, outDir);
     try {
-      copyDirRecursive(outDir, this.classesTargetDir);
-      return true;
+      return this.flushPending();
     } catch (err) {
       // A locked .class file (e.g. actively held open on Windows) or a permission hiccup
       // must not take down the whole sync - let alone Tomcat's entire startup sequence,
@@ -144,10 +151,10 @@ export class JavaBuildSyncWatcher {
     this.flushPending();
   }
 
-  private flushPending(): void {
+  private flushPending(): boolean {
     const entries = Array.from(this.pending.entries());
     this.pending.clear();
-    if (entries.length === 0) return;
+    if (entries.length === 0) return true;
 
     let copied = 0;
     let removed = 0;
@@ -195,5 +202,6 @@ export class JavaBuildSyncWatcher {
     for (const err of errors) {
       this.log(`[classes-sync] error syncing ${err}`);
     }
+    return errors.length === 0;
   }
 }
