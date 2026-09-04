@@ -281,9 +281,22 @@ export class ServerManager {
     return result;
   }
 
-  private startSourceSync(serverId: string, contextPath: string, overlayPath: string, docBase: string) {
+  private startSourceSync(
+    serverId: string,
+    contextPath: string,
+    overlayPath: string,
+    docBase: string,
+    outputChannelOverride?: vscode.OutputChannel
+  ) {
     this.stopSourceSync(serverId, contextPath);
-    const outputChannel = this.running.get(serverId)?.outputChannel;
+    // this.running.get(serverId) isn't populated yet during the initial doStart() call site
+    // (this runs before `this.running.set(id, info)`, same reason maybeStartJavaBuildSync
+    // takes an explicit outputChannel param instead of looking it up the same way) - without
+    // outputChannelOverride, that lookup silently returns undefined and this watcher's logger
+    // permanently never prints anything again for its whole lifetime, even though the actual
+    // file copying works fine. The other two callers (already-running server) don't need to
+    // pass this - the lookup works correctly for them.
+    const outputChannel = outputChannelOverride ?? this.running.get(serverId)?.outputChannel;
     const watcher = new SourceSyncWatcher(overlayPath, docBase, msg => outputChannel?.appendLine(msg), this.getSyncTrigger());
     watcher.start();
     this.syncWatchers.set(this.syncKey(serverId, contextPath), watcher);
@@ -625,7 +638,7 @@ export class ServerManager {
     const presyncTasks: Promise<void>[] = [];
     for (const app of server.deployedApps) {
       if (app.type === 'exploded' && app.sourceOverlayPath) {
-        this.startSourceSync(id, app.contextPath, app.sourceOverlayPath, app.sourcePath);
+        this.startSourceSync(id, app.contextPath, app.sourceOverlayPath, app.sourcePath, outputChannel);
         presyncTasks.push(
           (async () => {
             await this.maybeRunBuildBeforeStart(server, app.sourceOverlayPath!, app.sourcePath, outputChannel);

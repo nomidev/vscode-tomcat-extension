@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.16.17
+- **드디어 찾음: JSP/정적 파일 라이브 싱크(`[sync]`)가 서버를 처음 시작할 때 만들어진 watcher에서는 절대 로그를 안 찍던 근본 원인 수정**: `doStart()`가 `startSourceSync()`를 호출하는 시점이 `this.running.set(id, info)`(서버를 "실행 중"으로 등록하는 시점)보다 앞서 있었습니다. `startSourceSync` 내부는 로그 찍을 Output 채널을 `this.running.get(serverId)?.outputChannel`로 다시 조회하는데, 이 시점엔 아직 등록 전이라 `undefined`가 나와서 그 `SourceSyncWatcher`의 로그 콜백이 **생성된 순간부터 평생 아무것도 안 찍도록 고정**돼버렸습니다. 파일 복사 자체(`fs.copyFileSync`)는 로그와 무관하게 정상 동작했기 때문에, 반영은 되는데 로그만 계속 안 뜨는 것처럼 보였습니다. 같은 시점에 만들어지는 Java 클래스 동기화(`maybeStartJavaBuildSync`)는 같은 값을 다시 조회하는 대신 이미 존재하는 로컬 변수를 파라미터로 직접 전달받고 있어서 이 문제가 없었고, 그래서 Java는 로그가 잘 뜨고 JSP만 계속 안 뜨는 비대칭이 있었던 것입니다. 이제 `startSourceSync`도 `doStart()`가 가진 살아있는 Output 채널을 파라미터로 직접 전달받습니다.
+
 ## 0.16.16
 - **찾았습니다: watcher가 재시작될 때 실제로는 파일이 복사되는데도 `[sync]`/`[classes-sync]` 로그가 전혀 안 찍히던 진짜 원인 수정**: `start()`(그리고 `JavaBuildSyncWatcher`의 `syncAll()` - "Force Resync Classes Now"에서도 씀)가 지금까지 `copyDirRecursive`로 **무조건, 개수 세지도 로그도 안 남기고** 전체를 복사했습니다. 이 메서드는 최초 1회뿐 아니라 앱이 이미 배포된 상태에서 watcher가 다시 만들어질 때마다(예: Toggle Auto Context Reload, 소스 오버레이 경로 변경) 재실행되는데, 그때마다 최신 파일 내용이 조용히 반영되면서도 로그에는 아무 흔적이 안 남았습니다 - 딱 지금 겪으신 "내용은 반영되는데 로그가 안 뜬다"는 증상과 정확히 일치합니다. 이제 `start()`/`syncAll()`도 매 저장마다 쓰는 것과 똑같은 경로(내용 같으면 스킵, 실제로 복사/삭제된 것만 정확히 로그)를 타서, 언제 무엇이 반영됐는지 로그만 보고도 항상 정확히 알 수 있습니다.
 
