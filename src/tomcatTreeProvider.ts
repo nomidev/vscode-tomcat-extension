@@ -54,7 +54,7 @@ export class AppTreeItem extends vscode.TreeItem {
       appStatus === 'running'
         ? '이 앱은 정상적으로 배포되어 서비스되고 있습니다.'
         : appStatus === 'deploying'
-        ? '서버가 이 앱을 배포하는 중입니다. 앱이 크거나 초기화 로직이 무거우면 서버 자체는 떠도 이 앱만 잠시 더 걸릴 수 있습니다.'
+        ? '배포 또는 Reload Context Now 가 진행 중입니다. 앱이 크거나 초기화 로직이 무거우면 서버 자체는 떠도 이 앱만 잠시 더 걸릴 수 있습니다.'
         : appStatus === 'failed'
         ? '이 앱은 배포/기동 중 오류가 발생해 서비스되지 않고 있습니다. Output 채널의 로그를 확인하세요.'
         : '서버가 중지되어 있어 이 앱은 현재 서비스되고 있지 않습니다. 서버를 시작하면 반영됩니다.';

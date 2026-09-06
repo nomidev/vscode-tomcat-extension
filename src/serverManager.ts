@@ -194,6 +194,18 @@ export class ServerManager {
     return this.running.get(id)?.appStatus.get(contextPath) ?? 'stopped';
   }
 
+  /** Lets callers outside this class (namely ensureContextReloaded() in extension.ts) reflect
+   *  a transient state - e.g. showing the "deploying" spinner in the tree while a manual or
+   *  automatic Reload Context Now is in flight - the same way doStart()'s own internal
+   *  setAppStatus does during a fresh deploy. A no-op if the server isn't currently running
+   *  (nothing to reflect). */
+  setAppStatus(serverId: string, contextPath: string, status: AppStatus): void {
+    const info = this.running.get(serverId);
+    if (!info) return;
+    info.appStatus.set(contextPath, status);
+    this._onDidChange.fire();
+  }
+
   // ---------- server registration ----------
 
   async addServer(homePath: string, name?: string): Promise<TomcatServerConfig> {

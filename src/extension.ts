@@ -335,11 +335,18 @@ export function activate(context: vscode.ExtensionContext) {
     }
 
     const timeoutSeconds = vscode.workspace.getConfiguration('tomcat').get<number>('managerRequestTimeoutSeconds', 45);
+    // Reused as the "in flight" indicator: 'deploying' already renders the spinning icon and
+    // "배포 중..." label the tree uses for a fresh deploy, and reload is functionally the same
+    // thing (tear down and rebuild the context) from the tree's point of view. Without this,
+    // the icon just sat on whatever it was before, giving no feedback that anything was
+    // happening for however long the reload takes.
+    manager.setAppStatus(server.id, contextPath, 'deploying');
     const result = await reloadContext(server, creds, contextPath, timeoutSeconds * 1000);
     const channel = manager.getOutputChannel(server.id);
     channel?.appendLine(`[manager] reload ${contextPath || '/'}: ${result.message}`);
 
     if (result.ok) {
+      manager.setAppStatus(server.id, contextPath, 'running');
       if (!options.quiet) {
         vscode.window.showInformationMessage(`"${contextPath}" 를 즉시 리로드해 변경사항을 반영했습니다.`);
       }
@@ -347,6 +354,10 @@ export function activate(context: vscode.ExtensionContext) {
     }
 
     if (result.statusCode === 401) {
+      // Manager auth failed before Tomcat ever got to attempt the reload, so the context is
+      // presumably still serving whatever it was running before this call - not actually
+      // broken, just not updated. Revert the spinner back to 'running' rather than 'failed'.
+      manager.setAppStatus(server.id, contextPath, 'running');
       const choice = await vscode.window.showErrorMessage(
         `"${contextPath}" 를 반영하려던 중 Tomcat Manager 인증에 실패했습니다 (401). 저장된 계정 정보가 서버와 어긋난 것 같습니다.`,
         '자격 증명 초기화 후 재시작',
@@ -364,6 +375,10 @@ export function activate(context: vscode.ExtensionContext) {
       return;
     }
 
+    // Tomcat did attempt the reload and reported failure - by this point the old context was
+    // already torn down, so unlike the 401 case above, the app genuinely isn't serving
+    // correctly right now.
+    manager.setAppStatus(server.id, contextPath, 'failed');
     vscode.window.showWarningMessage(
       `"${contextPath}" 를 지금 서버에 반영하지 못했습니다 (${result.message}). 설정은 저장됐으니, ` +
         `서버를 재시작하거나 "Reload Context Now" 를 다시 시도해주세요.`
