@@ -633,6 +633,13 @@ export class ServerManager {
       }
     }
 
+    // Dispose any output channel left over from a previous start of this same server -
+    // otherwise every Start/Restart leaves the old channel (and all its buffered log text)
+    // registered in the Output dropdown forever, since VSCode never garbage-collects
+    // OutputChannels on its own. Only the in-memory reference is cleaned up here; this is
+    // unrelated to outputChannel.clear() above, which just empties the *new* channel's buffer.
+    this.running.get(id)?.outputChannel.dispose();
+
     const outputChannel = vscode.window.createOutputChannel(`Tomcat: ${server.name}`);
     outputChannel.clear();
     outputChannel.show(true);

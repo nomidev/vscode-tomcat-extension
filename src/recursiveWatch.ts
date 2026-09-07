@@ -29,15 +29,40 @@ export function watchRecursive(
 
   const watchers = new Map<string, fs.FSWatcher>();
 
+  // If `dir` (or anything under it) no longer exists, its watcher is dead weight - inotify
+  // silently drops it but the FSWatcher object and Map entry stay behind for the lifetime of
+  // the whole watch session otherwise. On large multi-module projects, target/classes-style
+  // trees with hundreds of package subdirectories being rebuilt (deleted + recreated) can
+  // otherwise leave a similar number of stale watcher handles accumulating in memory over a
+  // single long-running server session.
+  const unwatchDir = (dir: string) => {
+    const w = watchers.get(dir);
+    if (!w) return;
+    w.close();
+    watchers.delete(dir);
+    const prefix = dir + path.sep;
+    for (const key of watchers.keys()) {
+      if (key.startsWith(prefix)) {
+        watchers.get(key)?.close();
+        watchers.delete(key);
+      }
+    }
+  };
+
   const watchDir = (dir: string) => {
     if (watchers.has(dir)) return;
     try {
       const w = fs.watch(dir, (_event, filename) => {
+        if (!fs.existsSync(dir)) {
+          unwatchDir(dir);
+          return;
+        }
         if (!filename) return;
         const abs = path.join(dir, filename.toString());
         const rel = path.relative(rootDir, abs);
         onChange(rel);
-        if (fs.existsSync(abs) && fs.statSync(abs).isDirectory()) {
+        if (!fs.existsSync(abs)) return;
+        if (fs.statSync(abs).isDirectory()) {
           watchDir(abs);
         }
       });

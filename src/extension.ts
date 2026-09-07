@@ -11,6 +11,21 @@ import { hasManagerApp, ensureManagerUser, resetManagerUser, reloadContext } fro
 
 let activeManager: ServerManager | undefined;
 
+// Deploy-and-build ("빌드 후 배포") output channels, keyed by project root. Retrying the same
+// project (e.g. fixing a pom.xml error and building again) previously created a brand-new
+// OutputChannel every time via vscode.window.createOutputChannel, none of which were ever
+// disposed - each retry left another channel permanently registered in the Output dropdown,
+// still holding its full build log in memory. Reusing/disposing per project root keeps at
+// most one such channel alive per project.
+const buildChannels = new Map<string, vscode.OutputChannel>();
+
+function getOrCreateBuildChannel(projectRoot: string): vscode.OutputChannel {
+  buildChannels.get(projectRoot)?.dispose();
+  const channel = vscode.window.createOutputChannel(`Tomcat: Build (${path.basename(projectRoot)})`);
+  buildChannels.set(projectRoot, channel);
+  return channel;
+}
+
 export function activate(context: vscode.ExtensionContext) {
   const manager = new ServerManager(context);
   activeManager = manager;
@@ -679,7 +694,7 @@ export function activate(context: vscode.ExtensionContext) {
         );
         if (proceed !== '빌드 후 배포') return;
 
-        const buildChannel = vscode.window.createOutputChannel(`Tomcat: Build (${path.basename(projectRoot)})`);
+        const buildChannel = getOrCreateBuildChannel(projectRoot);
         buildChannel.clear();
         buildChannel.show(true);
 
