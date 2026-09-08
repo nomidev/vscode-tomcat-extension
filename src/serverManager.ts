@@ -34,9 +34,15 @@ interface RunningInfo {
    *  own, so on a long-running/verbose server this is what keeps memory bounded instead. */
   logBuffer: string;
   /** Holds an incomplete last line between stdout/stderr chunks, so error/exception coloring
-   *  (see colorizeChunk) is decided per complete line rather than by accident on whatever
-   *  byte range Node's stream happened to deliver in one 'data' event. */
+   *  (see writeLine) is decided per complete line rather than by accident on whatever byte
+   *  range Node's stream happened to deliver in one 'data' event. */
   partialLine: string;
+  /** Consecutive same-level (error or warn) lines waiting to be flushed as a single .error()/
+   *  .warn() call - see flushPending. A Java stack trace is one exception line followed by many
+   *  "at ..." frame lines; calling .error() separately per frame made VSCode render each frame
+   *  as its own timestamped/padded entry, which looked like huge gaps between every line. */
+  pendingLevel: 'error' | 'warn' | null;
+  pendingLines: string[];
 }
 
 /** Config value for tomcat.colorizeErrorOutput, cached per call. */
@@ -47,30 +53,55 @@ function isColorizeEnabled(): boolean {
 const ERROR_LINE = /\b(SEVERE|FATAL|ERROR)\b|Exception\b|Caused by:/;
 const WARN_LINE = /\b(WARNING|WARN)\b/;
 /** A Java stack trace frame, e.g. "	at com.foo.Bar.method(Bar.java:42)" - always follows an
- *  error/exception line, so it's colored the same way even though the frame line itself
+ *  error/exception line, so it's grouped into the same block even though the frame line itself
  *  doesn't contain "Exception" or "SEVERE". */
 const STACK_FRAME_LINE = /^\s*at\s+\S+\(.*\)\s*$/;
 
-/** Writes one complete line to the channel, colored red/yellow when it looks like an
- *  error/exception/stack-frame or warning line. Plain OutputChannel objects don't render ANSI
- *  escape codes at all (VSCode prints them as literal text), so real color requires the
- *  channel to have been created as a LogOutputChannel (see createServerOutputChannel) and its
- *  leveled .error()/.warn() methods - appendLine() alone never produces color. Note VSCode
- *  prefixes .error()/.warn() lines with its own timestamp and level tag, so those lines look
- *  slightly different from the plain-appended ones around them. */
-function writeLine(channel: vscode.OutputChannel, line: string, colorize: boolean): void {
-  if (colorize) {
-    const log = channel as Partial<vscode.LogOutputChannel>;
-    if ((ERROR_LINE.test(line) || STACK_FRAME_LINE.test(line)) && typeof log.error === 'function') {
-      log.error(line);
-      return;
-    }
-    if (WARN_LINE.test(line) && typeof log.warn === 'function') {
-      log.warn(line);
-      return;
-    }
+function classifyLine(line: string): 'error' | 'warn' | null {
+  if (ERROR_LINE.test(line) || STACK_FRAME_LINE.test(line)) return 'error';
+  if (WARN_LINE.test(line)) return 'warn';
+  return null;
+}
+
+/** Writes info.pendingLines to the channel as a single .error()/.warn() call (one exception's
+ *  header + all its stack frames become one block with one timestamp), then clears the pending
+ *  state. No-op if nothing is pending. */
+function flushPending(info: RunningInfo): void {
+  if (!info.pendingLevel || info.pendingLines.length === 0) {
+    info.pendingLevel = null;
+    info.pendingLines = [];
+    return;
   }
-  channel.appendLine(line);
+  const block = info.pendingLines.join('\n');
+  const log = info.outputChannel as Partial<vscode.LogOutputChannel>;
+  if (info.pendingLevel === 'error' && typeof log.error === 'function') {
+    log.error(block);
+  } else if (info.pendingLevel === 'warn' && typeof log.warn === 'function') {
+    log.warn(block);
+  } else {
+    info.outputChannel.appendLine(block);
+  }
+  info.pendingLevel = null;
+  info.pendingLines = [];
+}
+
+/** Routes one complete line either into the pending error/warn block (see flushPending) or, for
+ *  a plain line, flushes whatever was pending first and appends it directly. Plain OutputChannel
+ *  objects don't render ANSI escape codes at all (VSCode prints them as literal text), so real
+ *  color requires the channel to have been created as a LogOutputChannel (see
+ *  createServerOutputChannel) - appendLine() alone never produces color. */
+function writeLine(info: RunningInfo, line: string, colorize: boolean): void {
+  const level = colorize ? classifyLine(line) : null;
+  if (!level) {
+    flushPending(info);
+    info.outputChannel.appendLine(line);
+    return;
+  }
+  if (info.pendingLevel && info.pendingLevel !== level) {
+    flushPending(info);
+  }
+  info.pendingLevel = level;
+  info.pendingLines.push(line);
 }
 
 /** Splits off every complete line (terminated by \n) from info.partialLine + rawText, leaving
@@ -111,15 +142,17 @@ function capIfNeeded(info: RunningInfo): void {
   );
 }
 
-/** Writes every complete line in this stdout/stderr chunk to the channel (colored per
+/** Writes every complete line in this stdout/stderr chunk to the channel (colored/grouped per
  *  writeLine), tracks them in info.logBuffer for capIfNeeded, and buffers any trailing
- *  incomplete line in info.partialLine until the rest of it arrives. */
+ *  incomplete line in info.partialLine until the rest of it arrives. Note a pending error/warn
+ *  block (see flushPending) may deliberately sit unflushed across calls to this function, e.g.
+ *  a stack trace whose frames arrive across several stdout chunks. */
 function appendCapped(info: RunningInfo, rawText: string): void {
   const lines = extractCompleteLines(info, rawText);
   if (lines.length === 0) return;
   const colorize = isColorizeEnabled();
   for (const line of lines) {
-    writeLine(info.outputChannel, line, colorize);
+    writeLine(info, line, colorize);
     info.logBuffer += line + '\n';
   }
   capIfNeeded(info);
@@ -839,7 +872,7 @@ export class ServerManager {
     proc.once('exit', resolveBoot);
     proc.once('error', resolveBoot);
 
-    const info: RunningInfo = { proc, status: 'starting', outputChannel, appStatus: new Map(), logBuffer: '', partialLine: '' };
+    const info: RunningInfo = { proc, status: 'starting', outputChannel, appStatus: new Map(), logBuffer: '', partialLine: '', pendingLevel: null, pendingLines: [] };
     for (const app of server.deployedApps) {
       info.appStatus.set(app.contextPath, 'deploying');
     }
@@ -1005,9 +1038,10 @@ export class ServerManager {
 
     proc.on('exit', (code) => {
       if (info.partialLine) {
-        writeLine(outputChannel, info.partialLine, isColorizeEnabled());
+        writeLine(info, info.partialLine, isColorizeEnabled());
         info.partialLine = '';
       }
+      flushPending(info);
       outputChannel.appendLine(`\n[Tomcat] Process exited with code ${code}`);
       if (startupFailed) return;
       this.running.delete(id);
@@ -1017,9 +1051,10 @@ export class ServerManager {
 
     proc.on('error', (err) => {
       if (info.partialLine) {
-        writeLine(outputChannel, info.partialLine, isColorizeEnabled());
+        writeLine(info, info.partialLine, isColorizeEnabled());
         info.partialLine = '';
       }
+      flushPending(info);
       outputChannel.appendLine(`\n[Tomcat] Failed to start: ${err.message}`);
       if (startupFailed) return;
       vscode.window.showErrorMessage(`Tomcat 시작 실패: ${err.message}`);
