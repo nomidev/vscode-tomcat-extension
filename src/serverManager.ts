@@ -44,10 +44,6 @@ function isColorizeEnabled(): boolean {
   return vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>('colorizeErrorOutput', true);
 }
 
-const ANSI_RED = '\x1b[31m';
-const ANSI_YELLOW = '\x1b[33m';
-const ANSI_RESET = '\x1b[0m';
-
 const ERROR_LINE = /\b(SEVERE|FATAL|ERROR)\b|Exception\b|Caused by:/;
 const WARN_LINE = /\b(WARNING|WARN)\b/;
 /** A Java stack trace frame, e.g. "	at com.foo.Bar.method(Bar.java:42)" - always follows an
@@ -55,32 +51,37 @@ const WARN_LINE = /\b(WARNING|WARN)\b/;
  *  doesn't contain "Exception" or "SEVERE". */
 const STACK_FRAME_LINE = /^\s*at\s+\S+\(.*\)\s*$/;
 
-function colorizeLine(line: string): string {
-  if (ERROR_LINE.test(line) || STACK_FRAME_LINE.test(line)) {
-    return `${ANSI_RED}${line}${ANSI_RESET}`;
+/** Writes one complete line to the channel, colored red/yellow when it looks like an
+ *  error/exception/stack-frame or warning line. Plain OutputChannel objects don't render ANSI
+ *  escape codes at all (VSCode prints them as literal text), so real color requires the
+ *  channel to have been created as a LogOutputChannel (see createServerOutputChannel) and its
+ *  leveled .error()/.warn() methods - appendLine() alone never produces color. Note VSCode
+ *  prefixes .error()/.warn() lines with its own timestamp and level tag, so those lines look
+ *  slightly different from the plain-appended ones around them. */
+function writeLine(channel: vscode.OutputChannel, line: string, colorize: boolean): void {
+  if (colorize) {
+    const log = channel as Partial<vscode.LogOutputChannel>;
+    if ((ERROR_LINE.test(line) || STACK_FRAME_LINE.test(line)) && typeof log.error === 'function') {
+      log.error(line);
+      return;
+    }
+    if (WARN_LINE.test(line) && typeof log.warn === 'function') {
+      log.warn(line);
+      return;
+    }
   }
-  if (WARN_LINE.test(line)) {
-    return `${ANSI_YELLOW}${line}${ANSI_RESET}`;
-  }
-  return line;
+  channel.appendLine(line);
 }
 
-/** Colors complete SEVERE/ERROR/Exception/stack-trace/WARNING lines red or yellow before they
- *  reach the OutputChannel (VSCode's Output panel renders ANSI SGR codes). Only whole lines are
- *  colored - anything after the last newline in this chunk is held in info.partialLine until
- *  the rest of the line arrives in a later chunk, so a line split across two 'data' events
- *  never gets matched/colored against half its own text. */
-function colorizeChunk(info: RunningInfo, rawText: string): string {
-  if (!isColorizeEnabled()) {
-    return rawText;
-  }
+/** Splits off every complete line (terminated by \n) from info.partialLine + rawText, leaving
+ *  any trailing incomplete line buffered in info.partialLine for the next chunk - so a line
+ *  split across two stdout/stderr 'data' events is never matched/colored against half its own
+ *  text. */
+function extractCompleteLines(info: RunningInfo, rawText: string): string[] {
   const combined = info.partialLine + rawText;
-  const lines = combined.split('\n');
-  info.partialLine = lines.pop() ?? ''; // remainder after the last \n (often '', else incomplete)
-  if (lines.length === 0) {
-    return '';
-  }
-  return lines.map(colorizeLine).join('\n') + '\n';
+  const parts = combined.split('\n');
+  info.partialLine = parts.pop() ?? '';
+  return parts;
 }
 
 /** Config value for tomcat.outputMaxChars, cached per call - 0 disables capping entirely so
@@ -89,20 +90,14 @@ function getOutputMaxChars(): number {
   return vscode.workspace.getConfiguration(CONFIG_SECTION).get<number>('outputMaxChars', 2_000_000);
 }
 
-/** Appends text to both the OutputChannel and the run's rolling buffer, and once the buffer
- *  grows 20% past the configured cap, drops the oldest lines and rewrites the channel with
- *  just the retained tail via replace(). The 20% hysteresis means most appends stay on the
- *  cheap append() path - replace() (O(cap) every time) only runs occasionally, not per line. */
-function appendCapped(info: RunningInfo, rawText: string): void {
-  const text = colorizeChunk(info, rawText);
-  if (!text) return;
-  info.outputChannel.append(text);
+/** Once info.logBuffer grows 20% past the configured cap, drops the oldest lines and rewrites
+ *  the channel with just the retained tail via replace(). The 20% hysteresis means this (O(cap)
+ *  every time) only runs occasionally, not on every line. Note replace() only accepts a plain
+ *  string, so the retained tail loses its red/yellow coloring when this fires - new lines
+ *  appended afterwards still color normally. */
+function capIfNeeded(info: RunningInfo): void {
   const maxChars = getOutputMaxChars();
-  if (maxChars <= 0) {
-    return; // capping disabled
-  }
-  info.logBuffer += text;
-  if (info.logBuffer.length <= maxChars * 1.2) {
+  if (maxChars <= 0 || info.logBuffer.length <= maxChars * 1.2) {
     return;
   }
   let cut = info.logBuffer.length - maxChars;
@@ -114,6 +109,29 @@ function appendCapped(info: RunningInfo, rawText: string): void {
   info.outputChannel.replace(
     `[Tomcat] (오래된 로그가 tomcat.outputMaxChars 설정에 따라 생략되었습니다)\n${info.logBuffer}`
   );
+}
+
+/** Writes every complete line in this stdout/stderr chunk to the channel (colored per
+ *  writeLine), tracks them in info.logBuffer for capIfNeeded, and buffers any trailing
+ *  incomplete line in info.partialLine until the rest of it arrives. */
+function appendCapped(info: RunningInfo, rawText: string): void {
+  const lines = extractCompleteLines(info, rawText);
+  if (lines.length === 0) return;
+  const colorize = isColorizeEnabled();
+  for (const line of lines) {
+    writeLine(info.outputChannel, line, colorize);
+    info.logBuffer += line + '\n';
+  }
+  capIfNeeded(info);
+}
+
+/** Creates the per-server console channel. Uses VSCode's LogOutputChannel ({ log: true }) -
+ *  not a plain OutputChannel - because only LogOutputChannel's .error()/.warn() methods
+ *  actually render in color; a plain OutputChannel prints ANSI escape codes as literal text
+ *  instead of interpreting them. LogOutputChannel still supports plain append()/appendLine()
+ *  for every non-colored line, so this is a drop-in replacement everywhere else in this file. */
+function createServerOutputChannel(name: string): vscode.OutputChannel {
+  return vscode.window.createOutputChannel(name, { log: true });
 }
 
 function escapeRegex(s: string): string {
@@ -725,7 +743,7 @@ export class ServerManager {
     // unrelated to outputChannel.clear() above, which just empties the *new* channel's buffer.
     this.running.get(id)?.outputChannel.dispose();
 
-    const outputChannel = vscode.window.createOutputChannel(`Tomcat: ${server.name}`);
+    const outputChannel = createServerOutputChannel(`Tomcat: ${server.name}`);
     outputChannel.clear();
     outputChannel.show(true);
     outputChannel.appendLine(`[Tomcat] Preparing to start ${server.name}...`);
@@ -987,7 +1005,7 @@ export class ServerManager {
 
     proc.on('exit', (code) => {
       if (info.partialLine) {
-        outputChannel.append(colorizeLine(info.partialLine));
+        writeLine(outputChannel, info.partialLine, isColorizeEnabled());
         info.partialLine = '';
       }
       outputChannel.appendLine(`\n[Tomcat] Process exited with code ${code}`);
@@ -999,7 +1017,7 @@ export class ServerManager {
 
     proc.on('error', (err) => {
       if (info.partialLine) {
-        outputChannel.append(colorizeLine(info.partialLine));
+        writeLine(outputChannel, info.partialLine, isColorizeEnabled());
         info.partialLine = '';
       }
       outputChannel.appendLine(`\n[Tomcat] Failed to start: ${err.message}`);

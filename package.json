@@ -2,7 +2,7 @@
   "name": "vscode-tomcat",
   "displayName": "Tomcat for VSCode",
   "description": "Local Apache Tomcat integration for VSCode: register servers, deploy WAR/exploded apps, start/stop/debug, live JSP/Java reload, and view console logs.",
-  "version": "0.16.20",
+  "version": "0.16.21",
   "publisher": "local-dev",
   "repository": {
     "type": "git",
@@ -138,7 +138,7 @@
         "tomcat.colorizeErrorOutput": {
           "type": "boolean",
           "default": true,
-          "markdownDescription": "켜면(기본값) 서버 콘솔에서 `SEVERE`/`ERROR`/`Exception`/`Caused by:`/스택 트레이스(`at ...`) 줄은 빨간색으로, `WARNING`/`WARN` 줄은 노란색으로 표시합니다."
+          "markdownDescription": "켜면(기본값) 서버 콘솔에서 `SEVERE`/`ERROR`/`Exception`/`Caused by:`/스택 트레이스(`at ...`) 줄은 빨간색으로, `WARNING`/`WARN` 줄은 노란색으로 표시합니다. VSCode의 LogOutputChannel 기능을 사용하므로, 색이 입혀진 줄 앞에는 VSCode가 자체적으로 붙이는 타임스탬프/레벨 태그가 함께 표시됩니다."
         },
         "tomcat.servers": {
           "type": "array",
