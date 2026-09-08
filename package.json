@@ -2,7 +2,7 @@
   "name": "vscode-tomcat",
   "displayName": "Tomcat for VSCode",
   "description": "Local Apache Tomcat integration for VSCode: register servers, deploy WAR/exploded apps, start/stop/debug, live JSP/Java reload, and view console logs.",
-  "version": "0.16.19",
+  "version": "0.16.20",
   "publisher": "local-dev",
   "repository": {
     "type": "git",
@@ -129,6 +129,16 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "켜면(기본값) Tomcat 서버 시작 시 `conf/server.xml` 의 `<Host>` 에 `deployIgnore` 속성을 추가해서 번들 기본 웹앱(`ROOT`, `docs`, `examples`, `host-manager`)이 아예 실행되지 않도록 합니다. `manager` 앱은 \"Reload Context Now\" 기능에 필요해서 제외 대상에서 빠집니다. 이미 `deployIgnore` 를 직접 설정해두었다면 덮어쓰지 않습니다."
+        },
+        "tomcat.outputMaxChars": {
+          "type": "number",
+          "default": 2000000,
+          "markdownDescription": "서버 콘솔(Output) 채널에 보관할 로그의 최대 글자 수. VSCode의 OutputChannel은 기본적으로 내용을 자르지 않고 계속 쌓기 때문에, 서버를 오래 켜두거나 로그 레벨을 verbose하게 두면 메모리 사용량이 계속 늘어날 수 있습니다. 이 값을 넘으면 오래된 로그부터 잘라내고 채널을 다시 씁니다. `0`으로 설정하면 이전처럼 자르지 않습니다."
+        },
+        "tomcat.colorizeErrorOutput": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "켜면(기본값) 서버 콘솔에서 `SEVERE`/`ERROR`/`Exception`/`Caused by:`/스택 트레이스(`at ...`) 줄은 빨간색으로, `WARNING`/`WARN` 줄은 노란색으로 표시합니다."
         },
         "tomcat.servers": {
           "type": "array",

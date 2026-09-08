@@ -29,6 +29,91 @@ interface RunningInfo {
    *  separately from the server's own `status` so the tree can show each app's real state
    *  instead of just mirroring the server. */
   appStatus: Map<string, AppStatus>;
+  /** Rolling tail of everything written to outputChannel for this run, used only to cap the
+   *  channel's size (see appendCapped) - VSCode's OutputChannel keeps growing forever on its
+   *  own, so on a long-running/verbose server this is what keeps memory bounded instead. */
+  logBuffer: string;
+  /** Holds an incomplete last line between stdout/stderr chunks, so error/exception coloring
+   *  (see colorizeChunk) is decided per complete line rather than by accident on whatever
+   *  byte range Node's stream happened to deliver in one 'data' event. */
+  partialLine: string;
+}
+
+/** Config value for tomcat.colorizeErrorOutput, cached per call. */
+function isColorizeEnabled(): boolean {
+  return vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>('colorizeErrorOutput', true);
+}
+
+const ANSI_RED = '\x1b[31m';
+const ANSI_YELLOW = '\x1b[33m';
+const ANSI_RESET = '\x1b[0m';
+
+const ERROR_LINE = /\b(SEVERE|FATAL|ERROR)\b|Exception\b|Caused by:/;
+const WARN_LINE = /\b(WARNING|WARN)\b/;
+/** A Java stack trace frame, e.g. "	at com.foo.Bar.method(Bar.java:42)" - always follows an
+ *  error/exception line, so it's colored the same way even though the frame line itself
+ *  doesn't contain "Exception" or "SEVERE". */
+const STACK_FRAME_LINE = /^\s*at\s+\S+\(.*\)\s*$/;
+
+function colorizeLine(line: string): string {
+  if (ERROR_LINE.test(line) || STACK_FRAME_LINE.test(line)) {
+    return `${ANSI_RED}${line}${ANSI_RESET}`;
+  }
+  if (WARN_LINE.test(line)) {
+    return `${ANSI_YELLOW}${line}${ANSI_RESET}`;
+  }
+  return line;
+}
+
+/** Colors complete SEVERE/ERROR/Exception/stack-trace/WARNING lines red or yellow before they
+ *  reach the OutputChannel (VSCode's Output panel renders ANSI SGR codes). Only whole lines are
+ *  colored - anything after the last newline in this chunk is held in info.partialLine until
+ *  the rest of the line arrives in a later chunk, so a line split across two 'data' events
+ *  never gets matched/colored against half its own text. */
+function colorizeChunk(info: RunningInfo, rawText: string): string {
+  if (!isColorizeEnabled()) {
+    return rawText;
+  }
+  const combined = info.partialLine + rawText;
+  const lines = combined.split('\n');
+  info.partialLine = lines.pop() ?? ''; // remainder after the last \n (often '', else incomplete)
+  if (lines.length === 0) {
+    return '';
+  }
+  return lines.map(colorizeLine).join('\n') + '\n';
+}
+
+/** Config value for tomcat.outputMaxChars, cached per call - 0 disables capping entirely so
+ *  existing behavior (unbounded, like before this option existed) is still available. */
+function getOutputMaxChars(): number {
+  return vscode.workspace.getConfiguration(CONFIG_SECTION).get<number>('outputMaxChars', 2_000_000);
+}
+
+/** Appends text to both the OutputChannel and the run's rolling buffer, and once the buffer
+ *  grows 20% past the configured cap, drops the oldest lines and rewrites the channel with
+ *  just the retained tail via replace(). The 20% hysteresis means most appends stay on the
+ *  cheap append() path - replace() (O(cap) every time) only runs occasionally, not per line. */
+function appendCapped(info: RunningInfo, rawText: string): void {
+  const text = colorizeChunk(info, rawText);
+  if (!text) return;
+  info.outputChannel.append(text);
+  const maxChars = getOutputMaxChars();
+  if (maxChars <= 0) {
+    return; // capping disabled
+  }
+  info.logBuffer += text;
+  if (info.logBuffer.length <= maxChars * 1.2) {
+    return;
+  }
+  let cut = info.logBuffer.length - maxChars;
+  const nextNewline = info.logBuffer.indexOf('\n', cut);
+  if (nextNewline !== -1) {
+    cut = nextNewline + 1; // keep whole lines, don't split one down the middle
+  }
+  info.logBuffer = info.logBuffer.slice(cut);
+  info.outputChannel.replace(
+    `[Tomcat] (오래된 로그가 tomcat.outputMaxChars 설정에 따라 생략되었습니다)\n${info.logBuffer}`
+  );
 }
 
 function escapeRegex(s: string): string {
@@ -736,7 +821,7 @@ export class ServerManager {
     proc.once('exit', resolveBoot);
     proc.once('error', resolveBoot);
 
-    const info: RunningInfo = { proc, status: 'starting', outputChannel, appStatus: new Map() };
+    const info: RunningInfo = { proc, status: 'starting', outputChannel, appStatus: new Map(), logBuffer: '', partialLine: '' };
     for (const app of server.deployedApps) {
       info.appStatus.set(app.contextPath, 'deploying');
     }
@@ -863,7 +948,7 @@ export class ServerManager {
 
     proc.stdout.on('data', (d: Buffer) => {
       const text = d.toString();
-      outputChannel.append(text);
+      appendCapped(info, text);
 
       recentOutput = (recentOutput + text).slice(-2000);
       if (STARTUP_MARKER.test(recentOutput)) {
@@ -890,7 +975,7 @@ export class ServerManager {
 
     proc.stderr.on('data', (d: Buffer) => {
       const text = d.toString();
-      outputChannel.append(text);
+      appendCapped(info, text);
       checkAppDeployLinesStderr(text);
       if (info.status === 'starting') {
         const match = STARTUP_ERROR_MARKER.exec(text);
@@ -901,6 +986,10 @@ export class ServerManager {
     });
 
     proc.on('exit', (code) => {
+      if (info.partialLine) {
+        outputChannel.append(colorizeLine(info.partialLine));
+        info.partialLine = '';
+      }
       outputChannel.appendLine(`\n[Tomcat] Process exited with code ${code}`);
       if (startupFailed) return;
       this.running.delete(id);
@@ -909,6 +998,10 @@ export class ServerManager {
     });
 
     proc.on('error', (err) => {
+      if (info.partialLine) {
+        outputChannel.append(colorizeLine(info.partialLine));
+        info.partialLine = '';
+      }
       outputChannel.appendLine(`\n[Tomcat] Failed to start: ${err.message}`);
       if (startupFailed) return;
       vscode.window.showErrorMessage(`Tomcat 시작 실패: ${err.message}`);
