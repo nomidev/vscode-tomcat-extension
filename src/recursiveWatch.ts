@@ -121,22 +121,57 @@ export function copyDirRecursive(src: string, dest: string): void {
   }
 }
 
+/** Reads both files in fixed-size chunks and bails on the first difference, instead of pulling
+ *  both of them fully into memory. syncAll() feeds every file under an output dir through here
+ *  (server start, "Force Resync Classes Now", Toggle Auto Context Reload), so on a project with
+ *  thousands of compiled classes the old readFileSync-both approach allocated two full copies
+ *  of every file just to conclude "unchanged" for nearly all of them. */
+function contentsEqual(src: string, dest: string): boolean {
+  const CHUNK = 64 * 1024;
+  let srcFd: number | undefined;
+  let destFd: number | undefined;
+  try {
+    srcFd = fs.openSync(src, 'r');
+    destFd = fs.openSync(dest, 'r');
+    const srcBuf = Buffer.allocUnsafe(CHUNK);
+    const destBuf = Buffer.allocUnsafe(CHUNK);
+    for (;;) {
+      const srcRead = fs.readSync(srcFd, srcBuf, 0, CHUNK, null);
+      const destRead = fs.readSync(destFd, destBuf, 0, CHUNK, null);
+      if (srcRead !== destRead) return false; // shouldn't happen once sizes match, but be safe
+      if (srcRead === 0) return true; // both hit EOF with everything so far equal
+      if (!srcBuf.subarray(0, srcRead).equals(destBuf.subarray(0, destRead))) return false;
+    }
+  } catch {
+    return false;
+  } finally {
+    if (srcFd !== undefined) try { fs.closeSync(srcFd); } catch { /* ignore */ }
+    if (destFd !== undefined) try { fs.closeSync(destFd); } catch { /* ignore */ }
+  }
+}
+
 /**
  * Whether src and dest are byte-for-byte identical (dest missing counts as "not identical").
  * Used by the incremental watchers (SourceSyncWatcher, JavaBuildSyncWatcher) to skip the
  * actual copy - and the log line/reload-trigger side effects that come with it - when a save
  * didn't really change the file's content. Habitually hitting Ctrl+S (or a build tool
  * touching a file's mtime without changing its bytes) shouldn't count as a real change: the
- * size check first makes the common "genuinely changed" case cheap, and the full byte
- * comparison only runs on the same-size case, which for source/class/JSP-sized files is fast
- * enough not to matter.
+ * size check first makes the common "genuinely changed" case cheap, and the chunked byte
+ * comparison only runs on the same-size case.
+ *
+ * Note mtime is deliberately NOT used as a shortcut: copyFileSync gives dest the copy's own
+ * mtime, not src's, so dest's mtime is essentially always newer and an mtime check would
+ * never hit.
+ *
+ * Pass srcSize when the caller has already stat'd src (the flushPending loops do) so this
+ * doesn't stat the same file a second time.
  */
-export function filesAreIdentical(src: string, dest: string): boolean {
+export function filesAreIdentical(src: string, dest: string, srcSize?: number): boolean {
   try {
-    const srcStat = fs.statSync(src);
-    const destStat = fs.statSync(dest);
-    if (srcStat.size !== destStat.size) return false;
-    return fs.readFileSync(src).equals(fs.readFileSync(dest));
+    const srcBytes = srcSize ?? fs.statSync(src).size;
+    if (srcBytes !== fs.statSync(dest).size) return false;
+    if (srcBytes === 0) return true; // two empty files; skip opening them at all
+    return contentsEqual(src, dest);
   } catch {
     return false;
   }

@@ -7,7 +7,7 @@ import { findMetaInfContext, parseMetaInfContext } from './contextXml';
 import { LOG_LEVELS, TomcatServerConfig } from './model';
 import { detectWebappSource, isExplodedWebappFolder, resolveProjectRoot, detectBuildInfo } from './sourceOverlay';
 import { buildExplodedWebapp, findExistingExplodedOutput } from './explodedBuild';
-import { hasManagerApp, ensureManagerUser, resetManagerUser, reloadContext } from './tomcatManager';
+import { hasManagerApp, ensureManagerUser, resetManagerUser, reloadContext, waitForContextRunning } from './tomcatManager';
 
 let activeManager: ServerManager | undefined;
 
@@ -387,6 +387,34 @@ export function activate(context: vscode.ExtensionContext) {
           `설정은 저장됐지만, 서버를 재시작하거나 "Reload Context Now" 를 다시 시도해야 실제로 적용됩니다.`
         );
       }
+      return;
+    }
+
+    // The HTTP call gave up waiting, but Tomcat almost certainly kept reloading - a context
+    // with many beans can easily outlast the timeout. Marking it 'failed' here was wrong: the
+    // deploy usually succeeds moments later and the tree was left showing 배포 실패 for an app
+    // that is in fact serving fine. Keep the spinner and go ask the Manager what actually
+    // happened instead of guessing.
+    if (result.timedOut) {
+      const extraWaitMs = Math.max(timeoutSeconds, 60) * 1000;
+      const cameUp = await waitForContextRunning(server, creds, contextPath, extraWaitMs);
+      if (cameUp) {
+        manager.setAppStatus(server.id, contextPath, 'running');
+        channel?.appendLine(
+          `[manager] reload ${contextPath || '/'}: 응답은 시간 초과됐지만 이후 확인 결과 정상 기동됨`
+        );
+        if (!options.quiet) {
+          vscode.window.showInformationMessage(
+            `"${contextPath}" 리로드 응답이 시간 내에 오지 않았지만, 확인 결과 정상적으로 반영됐습니다.`
+          );
+        }
+        return;
+      }
+      manager.setAppStatus(server.id, contextPath, 'failed');
+      vscode.window.showWarningMessage(
+        `"${contextPath}" 리로드가 ${Math.round(extraWaitMs / 1000)}초를 더 기다린 뒤에도 기동이 확인되지 않았습니다. ` +
+          `서버 콘솔 로그를 확인해주세요. 애플리케이션이 원래 느리다면 tomcat.managerRequestTimeoutSeconds 값을 늘려보세요.`
+      );
       return;
     }
 

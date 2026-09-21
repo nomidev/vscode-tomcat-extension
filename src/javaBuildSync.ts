@@ -167,11 +167,19 @@ export class JavaBuildSyncWatcher {
       const src = path.join(outDir, relPath);
       const dest = path.join(this.classesTargetDir, relPath);
       try {
-        if (fs.existsSync(src)) {
-          const stat = fs.statSync(src);
+        // One statSync instead of existsSync + statSync: a missing src throws ENOENT, which is
+        // exactly the "deleted" branch below. Its .size is then handed to filesAreIdentical so
+        // src isn't stat'd a third time inside it.
+        let stat: fs.Stats | undefined;
+        try {
+          stat = fs.statSync(src);
+        } catch {
+          stat = undefined;
+        }
+        if (stat) {
           if (stat.isDirectory()) {
             fs.mkdirSync(dest, { recursive: true });
-          } else if (fs.existsSync(dest) && filesAreIdentical(src, dest)) {
+          } else if (filesAreIdentical(src, dest, stat.size)) {
             // Habitual Ctrl+S with no real change, or an IDE/build tool re-touching mtime
             // without changing bytes - nothing to actually copy. Importantly, this also
             // keeps lastSyncAt (used by the hot-swap-failure fallback to pick which app(s)

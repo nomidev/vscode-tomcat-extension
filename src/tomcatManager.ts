@@ -134,6 +134,11 @@ export interface ManagerResult {
   message: string;
   /** HTTP status code, when a response was received at all (e.g. 401/403/404). */
   statusCode?: number;
+  /** True when the request was abandoned because it exceeded timeoutMs, rather than because
+   *  Tomcat actually answered with a failure. The reload almost certainly kept running on the
+   *  server side, so this must NOT be treated the same as a reported failure - see
+   *  isContextRunning(), which callers use to find out what really happened. */
+  timedOut?: boolean;
 }
 
 function callManager(
@@ -166,6 +171,7 @@ function callManager(
       req.destroy();
       resolve({
         ok: false,
+        timedOut: true,
         message:
           `요청 시간 초과 (${Math.round(timeoutMs / 1000)}초). 리로드 자체는 서버에서 계속 진행 중일 수 있습니다 ` +
           `(빈이 많은 큰 애플리케이션은 컨텍스트 재로드에 시간이 걸릴 수 있어요) - 서버 콘솔 로그에서 완료됐는지 확인해보세요. ` +
@@ -186,4 +192,55 @@ export function reloadContext(
   timeoutMs?: number
 ): Promise<ManagerResult> {
   return callManager(server, creds, 'reload', { path: contextPath || '/' }, timeoutMs);
+}
+
+/**
+ * Asks the Manager app whether contextPath is currently deployed and running.
+ *
+ * Manager's `list` answers one line per context: `/path:State:sessions:docBase`, e.g.
+ * `/myapp:running:0:myapp`. This is how a reload that outlived its HTTP timeout gets
+ * resolved: the reload keeps going server-side after we stop waiting, so instead of assuming
+ * it failed we come back and ask what actually happened.
+ *
+ * Returns undefined when the question itself couldn't be answered (manager unreachable, auth
+ * problem, malformed output) - that's "don't know", which callers treat differently from a
+ * definite false.
+ */
+export async function isContextRunning(
+  server: TomcatServerConfig,
+  creds: ManagerCredentials,
+  contextPath: string,
+  timeoutMs: number = 10000
+): Promise<boolean | undefined> {
+  const result = await callManager(server, creds, 'list', {}, timeoutMs);
+  if (!result.ok) return undefined;
+  const wanted = contextPath || '/';
+  for (const line of result.message.split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith('/')) continue; // skip the "OK - Listed applications..." header
+    const [ctx, state] = trimmed.split(':');
+    if (ctx === wanted) return state === 'running';
+  }
+  return undefined; // context not listed at all - can't say it's stopped, only that it's absent
+}
+
+/**
+ * Waits for a context to come back up after a reload whose HTTP call timed out, polling
+ * `list` until it reports running or the budget runs out. Returns true only on a confirmed
+ * running state; false means it was still not running when we gave up (either genuinely
+ * broken, or slower than the budget).
+ */
+export async function waitForContextRunning(
+  server: TomcatServerConfig,
+  creds: ManagerCredentials,
+  contextPath: string,
+  budgetMs: number,
+  pollIntervalMs: number = 3000
+): Promise<boolean> {
+  const deadline = Date.now() + budgetMs;
+  for (;;) {
+    if (await isContextRunning(server, creds, contextPath)) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
+  }
 }
