@@ -28,6 +28,8 @@ VSCode에서 로컬 Apache Tomcat 서버를 등록·배포·실행/디버그하�
 - **Undeploy**: 배포 항목과 관련 파일을 정리합니다.
 - **전체 재시작 없는 반영**: 배포·Undeploy는 Tomcat 자체의 `autoDeploy` 가 처리합니다 — 서버가 실행 중이면 보통 수 초~15초 내로 그 앱만 배포/제거되고, 다른 앱이나 서버 프로세스 자체에는 영향 없습니다.
 - **기본 웹앱 제외** (기본 켜짐, `tomcat.excludeDefaultWebapps`): `ROOT`/`docs`/`examples`/`host-manager` 를 자동 배포에서 제외합니다. `manager` 는 "Reload Context Now" 에 필요해 제외 대상에서 빠집니다.
+- **앱 나중에 배포** (기본 꺼짐, `tomcat.deployAppsAfterStartup`): Tomcat을 먼저 기동하고, 등록된 앱은 서버가 뜬 뒤에 배포합니다. 서버는 몇 초 만에 뜨고 앱은 트리에서 `배포 중...` → `실행 중` 으로 바뀝니다(앱 초기화에 걸리는 총 시간은 같습니다). 서버 시작 직전에 앱의 배포 파일을 `conf/vscode-tomcat-deferred/` 로 잠시 옮겨뒀다가 기동 후 되돌려 Tomcat의 `autoDeploy` 가 배포하게 하는 방식이라, `<Host autoDeploy="false">` 이면 무시됩니다. 도중에 서버가 종료되거나 VSCode가 꺼져도 다음 시작 때 자동으로 복원됩니다.
+- **정상 종료(Windows)**: Windows에서는 서버를 멈출 때 먼저 Tomcat의 종료 포트(`server.xml` 의 `<Server port="8005" ...>`)로 정상 종료를 요청해서 웹앱이 정리 작업을 마치게 하고, 종료 포트가 꺼져 있거나 응답이 없을 때만 강제 종료합니다.
 - **멀티 컨텍스트**: 서버 하나에 여러 앱을 원하는 만큼 배포할 수 있습니다.
 
 ## 라이브 리로드 (Maven/Gradle)
@@ -91,6 +93,7 @@ Java 디버거의 정확한 내부 이벤트 스펙까지는 확정할 수 없�
 | `buildBeforeStart` | `true` | Tomcat 시작 전 1회 빌드 실행 여부 |
 | `mavenCommand` / `gradleCommand` | `mvn` / `gradle` | 빌드에 사용할 명령(래퍼 자동 감지) |
 | `excludeDefaultWebapps` | `true` | 기본 번들 웹앱 자동 배포 제외 여부 |
+| `deployAppsAfterStartup` | `false` | Tomcat을 먼저 기동하고 앱은 기동 후 배포할지 여부 |
 | `managerRequestTimeoutSeconds` | `45` | Manager API 요청 타임아웃(초) |
 | `autoReloadOnHotSwapFailure` | `true` | 핫스왑 실패 시 자동으로 Reload Context Now 실행 여부 |
 

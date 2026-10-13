@@ -498,21 +498,30 @@ export function activate(context: vscode.ExtensionContext) {
 
   reg('tomcat.editPorts', async (item: ServerTreeItem) => {
     if (!item) return;
+    const validatePort = (v: string) =>
+      /^\d+$/.test(v) && parseInt(v, 10) >= 1 && parseInt(v, 10) <= 65535 ? undefined : '1 ~ 65535 사이의 숫자를 입력하세요';
+
     const httpPortStr = await vscode.window.showInputBox({
       prompt: 'HTTP 포트',
       value: String(item.server.httpPort),
-      validateInput: v => (/^\d+$/.test(v) ? undefined : '숫자를 입력하세요')
+      validateInput: validatePort
     });
     if (httpPortStr === undefined) return;
 
     const debugPortStr = await vscode.window.showInputBox({
       prompt: '디버그 포트 (JPDA)',
       value: String(item.server.debugPort),
-      validateInput: v => (/^\d+$/.test(v) ? undefined : '숫자를 입력하세요')
+      validateInput: v => validatePort(v) ?? (v === httpPortStr ? 'HTTP 포트와 같은 번호는 쓸 수 없습니다' : undefined)
     });
     if (debugPortStr === undefined) return;
 
-    await manager.updatePorts(item.server.id, parseInt(httpPortStr, 10), parseInt(debugPortStr, 10));
+    const applied = await manager.updatePorts(item.server.id, parseInt(httpPortStr, 10), parseInt(debugPortStr, 10));
+    if (applied && !applied.changed && applied.from === undefined) {
+      vscode.window.showWarningMessage(
+        'server.xml 에서 HTTP 포트를 찾지 못해(포트가 ${...} 같은 변수이거나 파일을 읽을 수 없음) 파일에는 반영하지 못했습니다. ' +
+          'Tomcat 이 실제로 쓰는 포트는 server.xml 에서 직접 바꿔 주세요.'
+      );
+    }
     vscode.window.showInformationMessage(
       `${item.server.name} 의 포트가 HTTP ${httpPortStr} / Debug ${debugPortStr} 로 설정되었습니다. 포트는 서버 시작 시에만 적용되는 설정이라, 다음 시작/재시작 시 반영됩니다.`
     );
@@ -651,7 +660,13 @@ export function activate(context: vscode.ExtensionContext) {
     const defaultName = path.basename(uris[0].fsPath, '.war');
     const contextPath = await vscode.window.showInputBox({
       prompt: '컨텍스트 경로 (애플리케이션 이름)',
-      value: defaultName
+      value: defaultName,
+      validateInput: v => {
+        const name = v.trim().replace(/^\/+/, '');
+        return name === '' || /[\\/:*?"<>|]/.test(name)
+          ? '비어 있거나 / \\ : * ? " < > | 문자를 포함할 수 없습니다'
+          : undefined;
+      }
     });
     if (contextPath === undefined) return;
 

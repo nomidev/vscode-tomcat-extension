@@ -2,7 +2,7 @@
   "name": "vscode-tomcat",
   "displayName": "Tomcat for VSCode",
   "description": "Local Apache Tomcat integration for VSCode: register servers, deploy WAR/exploded apps, start/stop/debug, live JSP/Java reload, and view console logs.",
-  "version": "0.16.25",
+  "version": "0.16.28",
   "publisher": "local-dev",
   "repository": {
     "type": "git",
@@ -129,6 +129,11 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "켜면(기본값) Tomcat 서버 시작 시 `conf/server.xml` 의 `<Host>` 에 `deployIgnore` 속성을 추가해서 번들 기본 웹앱(`ROOT`, `docs`, `examples`, `host-manager`)이 아예 실행되지 않도록 합니다. `manager` 앱은 \"Reload Context Now\" 기능에 필요해서 제외 대상에서 빠집니다. 이미 `deployIgnore` 를 직접 설정해두었다면 덮어쓰지 않습니다."
+        },
+        "tomcat.deployAppsAfterStartup": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "켜면 Tomcat을 **먼저 기동**하고, 등록된 앱(WAR/exploded)은 서버가 뜬 뒤에 배포합니다. Tomcat은 원래 모든 앱의 초기화(Spring 컨텍스트, JAR 스캔 등)를 끝내야 `Server startup` 이 되는데, 이 옵션을 켜면 서버는 몇 초 만에 뜨고 앱은 트리에서 `배포 중...` 으로 표시되다가 각자 준비되는 대로 `실행 중` 이 됩니다. 앱 초기화에 걸리는 총 시간 자체는 같습니다. 서버 시작 직전에 앱의 배포 파일(`conf/Catalina/localhost/*.xml`, `webapps/*.war`)을 `conf/vscode-tomcat-deferred/` 로 잠시 옮겨뒀다가 기동 후 되돌려 Tomcat의 autoDeploy가 배포하게 하는 방식이라, `server.xml` 의 `<Host>` 에 `autoDeploy=\"false\"` 가 있으면 이 옵션은 무시됩니다. 서버가 도중에 종료되거나 다음 시작 때 남은 파일은 자동으로 원래 위치로 복원됩니다."
         },
         "tomcat.outputMaxChars": {
           "type": "number",

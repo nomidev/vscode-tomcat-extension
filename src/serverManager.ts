@@ -15,6 +15,8 @@ import { SourceSyncWatcher, SyncTrigger } from './sourceSync';
 import { JavaBuildSyncWatcher } from './javaBuildSync';
 import { findProjectRoot, detectBuildInfo } from './sourceOverlay';
 import { runBuildOnce } from './buildRunner';
+import { parkApps, restoreParked, discardParked, isHostAutoDeployDisabled } from './deferredDeploy';
+import { ApplyPortResult, applyHttpPort, readHttpPort, readShutdownConfig, sendShutdown } from './tomcatConfig';
 
 const CONFIG_SECTION = 'tomcat';
 const CONFIG_KEY = 'servers';
@@ -209,6 +211,12 @@ export class ServerManager {
     return vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>('excludeDefaultWebapps', true);
   }
 
+  /** Whether Tomcat should be started first and the deployed apps only deployed once it's up
+   *  (see deferredDeploy.ts), instead of Tomcat deploying every app as part of its own boot. */
+  isDeployAppsAfterStartupEnabled(): boolean {
+    return vscode.workspace.getConfiguration(CONFIG_SECTION).get<boolean>('deployAppsAfterStartup', false);
+  }
+
   getServers(): TomcatServerConfig[] {
     return this.servers;
   }
@@ -275,12 +283,21 @@ export class ServerManager {
     await this.save();
   }
 
-  async updatePorts(id: string, httpPort: number, debugPort: number) {
+  /**
+   * Stores the new ports and writes the HTTP port into server.xml's HTTP connector - the stored
+   * value alone only changes what URLs/Manager calls use, Tomcat itself listens on whatever
+   * server.xml says. (Tomcat only reads server.xml at startup, so this is safe while running; the
+   * debug port is passed through JPDA_ADDRESS at start and needs no file change.) The returned
+   * result says whether the file could be updated.
+   */
+  async updatePorts(id: string, httpPort: number, debugPort: number): Promise<ApplyPortResult | undefined> {
     const server = this.getServer(id);
-    if (!server) return;
+    if (!server) return undefined;
+    const applied = applyHttpPort(server.homePath, httpPort);
     server.httpPort = httpPort;
     server.debugPort = debugPort;
     await this.save();
+    return applied;
   }
 
   async updateJavaHome(id: string, javaHome: string | undefined) {
@@ -527,6 +544,8 @@ export class ServerManager {
   }
 
   private detectHttpPort(homePath: string): number | undefined {
+    const detected = readHttpPort(homePath);
+    if (detected !== undefined) return detected;
     try {
       const serverXml = fs.readFileSync(path.join(homePath, 'conf', 'server.xml'), 'utf8');
       const match = serverXml.match(/<Connector[^>]*\bport="(\d+)"[^>]*protocol="HTTP\/1\.1"/);
@@ -680,6 +699,13 @@ export class ServerManager {
     outputChannel.show(true);
     outputChannel.appendLine(`[Tomcat] Preparing to start ${server.name}...`);
 
+    // A previous session that died while apps were still parked (see deferredDeploy.ts) would
+    // otherwise leave them missing from Tomcat's point of view - always put them back first.
+    const leftovers = restoreParked(server.homePath, msg => outputChannel.appendLine(msg));
+    if (leftovers.length > 0) {
+      outputChannel.appendLine(`[Tomcat] 이전 실행에서 대기 중이던 앱 파일을 원래 위치로 복원했습니다: ${leftovers.join(', ')}`);
+    }
+
     if (this.isExcludeDefaultWebappsEnabled()) {
       this.applyDeployIgnore(server.homePath, outputChannel);
     }
@@ -731,7 +757,10 @@ export class ServerManager {
     if (server.javaHome) {
       env.JAVA_HOME = server.javaHome;
       const javaBin = path.join(server.javaHome, 'bin');
-      env.PATH = `${javaBin}${path.delimiter}${env.PATH ?? ''}`;
+      // On Windows the variable is usually spelled "Path" - writing env.PATH next to it would
+      // create a second, differently-cased entry instead of changing the real one.
+      const pathKey = Object.keys(env).find(k => k.toLowerCase() === 'path') ?? 'PATH';
+      env[pathKey] = `${javaBin}${path.delimiter}${env[pathKey] ?? ''}`;
     }
 
     if (server.vmOptions && server.vmOptions.trim()) {
@@ -740,6 +769,40 @@ export class ServerManager {
 
     const effectiveLogLevel = server.logLevel ?? this.getDefaultLogLevel();
     this.applyLogLevel(server.homePath, effectiveLogLevel);
+
+    // Tomcat listens on whatever server.xml says, and that's the port the browser URL and the
+    // Manager calls must use - so if the two ever differ (server.xml edited by hand, or a port
+    // saved by an older version that never wrote it to the file), follow the file.
+    const actualHttpPort = readHttpPort(server.homePath);
+    if (actualHttpPort !== undefined && actualHttpPort !== server.httpPort) {
+      outputChannel.appendLine(
+        `[Tomcat] server.xml 의 HTTP 포트(${actualHttpPort})가 저장된 설정(${server.httpPort})과 달라서 server.xml 값을 따릅니다. ` +
+          '포트를 바꾸려면 "Tomcat: Edit Ports" 를 사용하세요.'
+      );
+      server.httpPort = actualHttpPort;
+      await this.save();
+    }
+
+    // "Start Tomcat first, deploy the apps afterwards": take the apps' deployment files out of
+    // Tomcat's sight so its own boot has nothing to deploy and "Server startup" shows up right
+    // away; they're put back (and Tomcat's autoDeploy scan deploys them) once it's up - see
+    // triggerDeferredDeploy below. Needs Host autoDeploy, so it's skipped if that's turned off.
+    let deferredContextPaths: string[] = [];
+    if (this.isDeployAppsAfterStartupEnabled() && server.deployedApps.length > 0) {
+      if (isHostAutoDeployDisabled(server.homePath)) {
+        outputChannel.appendLine(
+          '[Tomcat] tomcat.deployAppsAfterStartup 이 켜져 있지만 server.xml 의 <Host> 에 autoDeploy="false" 가 설정되어 있어 ' +
+            '기동 후 배포를 쓸 수 없습니다. 이번에는 기존 방식(서버 시작 때 함께 배포)으로 시작합니다.'
+        );
+      } else {
+        deferredContextPaths = parkApps(server.homePath, server.deployedApps, msg => outputChannel.appendLine(msg));
+        if (deferredContextPaths.length > 0) {
+          outputChannel.appendLine(
+            `[Tomcat] 앱 나중에 배포 모드: 서버를 먼저 기동하고, 앱 ${deferredContextPaths.length}개(${deferredContextPaths.join(', ')})는 기동 후 배포합니다.`
+          );
+        }
+      }
+    }
 
     const args = ['run'];
     if (debug) {
@@ -753,7 +816,11 @@ export class ServerManager {
     outputChannel.appendLine(`[Tomcat] Log level = ${effectiveLogLevel}`);
     outputChannel.appendLine(`[Tomcat] CATALINA_OPTS = ${env.CATALINA_OPTS ?? '(none)'}`);
 
-    const proc = spawn(script, args, {
+    // With shell:true on Windows the command line is handed to cmd.exe as one string, so a Tomcat
+    // folder with spaces in its path (e.g. "Program Files") has to be quoted or cmd stops
+    // at the first space.
+    const command = process.platform === 'win32' && /\s/.test(script) ? `"${script}"` : script;
+    const proc = spawn(command, args, {
       env,
       cwd: server.homePath,
       detached: process.platform !== 'win32',
@@ -896,6 +963,25 @@ export class ServerManager {
       }
     };
 
+    // Deploys the apps that were held back (see above) once Tomcat itself is up, by putting their
+    // files back where Tomcat's autoDeploy scan looks - it picks them up within a few seconds and
+    // logs the usual per-app "has finished" line, which the deploy-line checker turns into the
+    // app's running/failed status. Idempotent: called from the startup banner and the 20s fallback.
+    let deferredTriggered = false;
+    const triggerDeferredDeploy = () => {
+      if (deferredTriggered || startupFailed || deferredContextPaths.length === 0) return;
+      deferredTriggered = true;
+      outputChannel.appendLine(
+        `\n[Tomcat] 서버 기동 완료 - 앱 ${deferredContextPaths.length}개 배포를 시작합니다: ${deferredContextPaths.join(', ')} ` +
+          '(Tomcat autoDeploy 가 몇 초 안에 감지해서 배포합니다)'
+      );
+      const restored = restoreParked(server.homePath, msg => outputChannel.appendLine(msg));
+      if (restored.length === 0) {
+        outputChannel.appendLine('[Tomcat] 되돌릴 앱 파일이 없습니다 (그 사이 앱이 제거되었을 수 있습니다).');
+        for (const cp of deferredContextPaths) setAppStatus(cp, 'failed');
+      }
+    };
+
     proc.stdout.on('data', (d: Buffer) => {
       const text = d.toString();
       appendCapped(info, text);
@@ -910,10 +996,14 @@ export class ServerManager {
       if (STARTUP_COMPLETE_MARKER.test(recentOutput)) {
         notifyStartedOnce(false);
         for (const m of this.computeAppDeployMatchers(server)) {
+          // Apps held back for deferred deployment haven't been deployed by this banner - their
+          // status comes from their own deploy log lines instead.
+          if (deferredContextPaths.includes(m.contextPath)) continue;
           if (info.appStatus.get(m.contextPath) === 'deploying') {
             setAppStatus(m.contextPath, 'running');
           }
         }
+        triggerDeferredDeploy();
       }
       if (info.status === 'starting') {
         const match = STARTUP_ERROR_MARKER.exec(text);
@@ -937,6 +1027,13 @@ export class ServerManager {
 
     proc.on('exit', (code) => {
       outputChannel.appendLine(`\n[Tomcat] Process exited with code ${code}`);
+      // A late exit event from an older process (stop() gave up waiting and the server was
+      // started again) must not clear the newer session's state or move its held-back apps.
+      const current = this.running.get(id);
+      if (current && current !== info) return;
+      // If the server went down while apps were still held back, give them back to Tomcat's
+      // folders so they aren't left missing.
+      restoreParked(server.homePath);
       if (startupFailed) return;
       this.running.delete(id);
       this.stopAllSyncForServer(id);
@@ -945,6 +1042,9 @@ export class ServerManager {
 
     proc.on('error', (err) => {
       outputChannel.appendLine(`\n[Tomcat] Failed to start: ${err.message}`);
+      const current = this.running.get(id);
+      if (current && current !== info) return;
+      restoreParked(server.homePath);
       if (startupFailed) return;
       vscode.window.showErrorMessage(`Tomcat 시작 실패: ${err.message}`);
       this.running.delete(id);
@@ -965,6 +1065,7 @@ export class ServerManager {
       }
       attachOnce();
       notifyStartedOnce(true);
+      triggerDeferredDeploy();
     }, 20000);
   }
 
@@ -1058,9 +1159,26 @@ export class ServerManager {
       }
     };
 
-    sendSignal('SIGTERM');
+    // Windows has no SIGTERM: taskkill /F ends the JVM on the spot, so webapps never get to run
+    // contextDestroyed / close their Spring context / return DB connections. Tomcat's own shutdown
+    // port (what `catalina stop` uses) stops it cleanly, so try that first and keep the hard kill
+    // as the fallback (shutdown port disabled/unreachable, or Tomcat hung while stopping).
+    let graceful = false;
+    if (process.platform === 'win32') {
+      const shutdownCfg = readShutdownConfig(server.homePath);
+      if (shutdownCfg) {
+        graceful = await sendShutdown(shutdownCfg);
+        if (graceful) {
+          info.outputChannel.appendLine('[Tomcat] 종료 포트로 정상 종료를 요청했습니다 (앱이 정리 작업을 마칠 때까지 기다립니다)...');
+        }
+      }
+    }
+    if (!graceful) {
+      sendSignal('SIGTERM');
+    }
 
-    const gracePeriod = new Promise<void>(resolve => setTimeout(resolve, 8000));
+    // A clean shutdown can take a while on a big app (Spring context close, pool cleanup).
+    const gracePeriod = new Promise<void>(resolve => setTimeout(resolve, graceful ? 20000 : 8000));
     await Promise.race([exited, gracePeriod]);
 
     if (this.running.has(id)) {
@@ -1081,8 +1199,11 @@ export class ServerManager {
     const entries = Array.from(this.running.entries());
     if (entries.length === 0) return;
 
-    entries.forEach(([, info]) => {
-      const pid = info.proc.pid;
+    const exitedPromises = entries.map(
+      ([, info]) => new Promise<void>(resolve => info.proc.once('exit', () => resolve()))
+    );
+
+    const hardKill = (pid: number | undefined) => {
       try {
         if (process.platform === 'win32') {
           spawn('taskkill', ['/pid', String(pid), '/T', '/F']);
@@ -1092,12 +1213,29 @@ export class ServerManager {
       } catch {
         // ignore
       }
-    });
+    };
 
-    const allExited = Promise.all(
-      entries.map(([, info]) => new Promise<void>(resolve => info.proc.once('exit', () => resolve())))
-    );
-    await Promise.race([allExited, new Promise<void>(resolve => setTimeout(resolve, 3000))]);
+    if (process.platform === 'win32') {
+      // Ask each server to shut down cleanly through its shutdown port first (see stop()); only
+      // the ones that can't be asked, or that are still alive after the short wait, get killed.
+      const asked = await Promise.all(
+        entries.map(async ([, info], i) => {
+          const server = this.getServer(entries[i][0]);
+          const cfg = server ? readShutdownConfig(server.homePath) : undefined;
+          return cfg ? await sendShutdown(cfg, 1000) : false;
+        })
+      );
+      entries.forEach(([, info], i) => {
+        if (!asked[i]) hardKill(info.proc.pid);
+      });
+      await Promise.race([Promise.all(exitedPromises), new Promise<void>(resolve => setTimeout(resolve, 3000))]);
+      entries.forEach(([id, info]) => {
+        if (this.running.get(id) === info) hardKill(info.proc.pid);
+      });
+    } else {
+      entries.forEach(([, info]) => hardKill(info.proc.pid));
+      await Promise.race([Promise.all(exitedPromises), new Promise<void>(resolve => setTimeout(resolve, 3000))]);
+    }
 
     // Belt-and-braces: make sure no sync/build watchers are left running regardless of
     // whether the process 'exit' events above fired in time.
@@ -1128,7 +1266,12 @@ export class ServerManager {
     const server = this.getServer(id);
     if (!server) return;
 
-    const appName = contextPath ?? path.basename(warPath, '.war');
+    // "/myapp" and "myapp" mean the same thing (previously "/myapp" produced a "//myapp" context
+    // path), and the name becomes a file name in webapps/, so reject anything that can't be one.
+    const appName = (contextPath ?? path.basename(warPath, '.war')).trim().replace(/^\/+/, '').replace(/\.war$/i, '');
+    if (appName === '' || /[\\/:*?"<>|]/.test(appName)) {
+      throw new Error(`올바르지 않은 컨텍스트 이름입니다: "${contextPath ?? ''}" (비어 있거나 / \\ : * ? " < > | 문자를 포함할 수 없습니다)`);
+    }
     const destDir = path.join(server.homePath, 'webapps');
     fs.mkdirSync(destDir, { recursive: true });
     const dest = path.join(destDir, `${appName}.war`);
@@ -1331,6 +1474,10 @@ export class ServerManager {
     } catch (err: any) {
       vscode.window.showWarningMessage(`Undeploy 중 일부 파일을 제거하지 못했습니다: ${err?.message ?? err}`);
     }
+
+    // If the app's files are currently held back for deferred deployment, drop those copies too
+    // so they can't come back when the server finishes booting.
+    discardParked(server.homePath, app);
 
     server.deployedApps = server.deployedApps.filter(a => a.contextPath !== contextPath);
     await this.save();
