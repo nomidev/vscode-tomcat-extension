@@ -16,6 +16,7 @@ import { JavaBuildSyncWatcher } from './javaBuildSync';
 import { findProjectRoot, detectBuildInfo } from './sourceOverlay';
 import { runBuildOnce } from './buildRunner';
 import { parkApps, restoreParked, discardParked, isHostAutoDeployDisabled } from './deferredDeploy';
+import { CappedOutput } from './cappedOutput';
 import { ApplyPortResult, applyHttpPort, readHttpPort, readShutdownConfig, sendShutdown } from './tomcatConfig';
 
 const CONFIG_SECTION = 'tomcat';
@@ -31,41 +32,16 @@ interface RunningInfo {
    *  separately from the server's own `status` so the tree can show each app's real state
    *  instead of just mirroring the server. */
   appStatus: Map<string, AppStatus>;
-  /** Rolling tail of everything written to outputChannel for this run, used only to cap the
-   *  channel's size (see appendCapped) - VSCode's OutputChannel keeps growing forever on its
-   *  own, so on a long-running/verbose server this is what keeps memory bounded instead. */
-  logBuffer: string;
+  /** Writes the process's stdout/stderr to outputChannel in batches and trims the channel once it
+   *  grows past tomcat.outputMaxChars (see cappedOutput.ts) - VSCode's OutputChannel keeps growing
+   *  forever on its own, and a chatty server must not swamp VSCode with one message per chunk. */
+  output: CappedOutput;
 }
 
-/** Config value for tomcat.outputMaxChars, cached per call - 0 disables capping entirely so
- *  existing behavior (unbounded, like before this option existed) is still available. */
+/** Config value for tomcat.outputMaxChars, read fresh on every flush - 0 disables capping
+ *  entirely so the old behavior (unbounded) is still available. */
 function getOutputMaxChars(): number {
   return vscode.workspace.getConfiguration(CONFIG_SECTION).get<number>('outputMaxChars', 2_000_000);
-}
-
-/** Appends text to both the OutputChannel and the run's rolling buffer, and once the buffer
- *  grows 20% past the configured cap, drops the oldest lines and rewrites the channel with
- *  just the retained tail via replace(). The 20% hysteresis means most appends stay on the
- *  cheap append() path - replace() (O(cap) every time) only runs occasionally, not per line. */
-function appendCapped(info: RunningInfo, text: string): void {
-  info.outputChannel.append(text);
-  const maxChars = getOutputMaxChars();
-  if (maxChars <= 0) {
-    return; // capping disabled
-  }
-  info.logBuffer += text;
-  if (info.logBuffer.length <= maxChars * 1.2) {
-    return;
-  }
-  let cut = info.logBuffer.length - maxChars;
-  const nextNewline = info.logBuffer.indexOf('\n', cut);
-  if (nextNewline !== -1) {
-    cut = nextNewline + 1; // keep whole lines, don't split one down the middle
-  }
-  info.logBuffer = info.logBuffer.slice(cut);
-  info.outputChannel.replace(
-    `[Tomcat] (오래된 로그가 tomcat.outputMaxChars 설정에 따라 생략되었습니다)\n${info.logBuffer}`
-  );
 }
 
 function escapeRegex(s: string): string {
@@ -86,6 +62,11 @@ function escapeXmlAttr(value: string): string {
 export class ServerManager {
   private servers: TomcatServerConfig[] = [];
   private running = new Map<string, RunningInfo>();
+  /** One console channel per server, kept for the life of the server entry and reused on every
+   *  start. (An entry in `running` is deleted when the process exits, so anything keyed off it is
+   *  already gone by the next start - creating a fresh channel each time left every previous
+   *  one, with all its log text, registered in the Output dropdown forever.) */
+  private outputChannels = new Map<string, { name: string; channel: vscode.OutputChannel }>();
   // Server ids currently between start() being invoked and the child process actually being
   // spawned (registered into `running`). Covers the gap where output-channel setup, deploy-
   // ignore file writes, and - for apps with live source sync - a full pre-start Maven/Gradle
@@ -279,6 +260,8 @@ export class ServerManager {
       await this.stop(id);
     }
     this.stopAllSyncForServer(id);
+    this.outputChannels.get(id)?.channel.dispose();
+    this.outputChannels.delete(id);
     this.servers = this.servers.filter(s => s.id !== id);
     await this.save();
   }
@@ -538,6 +521,16 @@ export class ServerManager {
 
   // ---------- detection helpers ----------
 
+  private ensureOutputChannel(server: TomcatServerConfig): vscode.OutputChannel {
+    const name = `Tomcat: ${server.name}`;
+    const existing = this.outputChannels.get(server.id);
+    if (existing && existing.name === name) return existing.channel;
+    existing?.channel.dispose(); // the server was renamed
+    const channel = vscode.window.createOutputChannel(name);
+    this.outputChannels.set(server.id, { name, channel });
+    return channel;
+  }
+
   private getCatalinaScript(homePath: string): string {
     const isWin = process.platform === 'win32';
     return path.join(homePath, 'bin', isWin ? 'catalina.bat' : 'catalina.sh');
@@ -687,14 +680,8 @@ export class ServerManager {
       }
     }
 
-    // Dispose any output channel left over from a previous start of this same server -
-    // otherwise every Start/Restart leaves the old channel (and all its buffered log text)
-    // registered in the Output dropdown forever, since VSCode never garbage-collects
-    // OutputChannels on its own. Only the in-memory reference is cleaned up here; this is
-    // unrelated to outputChannel.clear() above, which just empties the *new* channel's buffer.
-    this.running.get(id)?.outputChannel.dispose();
-
-    const outputChannel = vscode.window.createOutputChannel(`Tomcat: ${server.name}`);
+    // Reuse this server's console channel (see outputChannels) and start it empty.
+    const outputChannel = this.ensureOutputChannel(server);
     outputChannel.clear();
     outputChannel.show(true);
     outputChannel.appendLine(`[Tomcat] Preparing to start ${server.name}...`);
@@ -838,7 +825,16 @@ export class ServerManager {
     proc.once('exit', resolveBoot);
     proc.once('error', resolveBoot);
 
-    const info: RunningInfo = { proc, status: 'starting', outputChannel, appStatus: new Map(), logBuffer: '' };
+    const info: RunningInfo = {
+      proc,
+      status: 'starting',
+      outputChannel,
+      appStatus: new Map(),
+      output: new CappedOutput(
+        { append: t => outputChannel.append(t), replace: t => outputChannel.replace(t) },
+        getOutputMaxChars
+      )
+    };
     for (const app of server.deployedApps) {
       info.appStatus.set(app.contextPath, 'deploying');
     }
@@ -946,6 +942,7 @@ export class ServerManager {
       for (const [contextPath, appSt] of info.appStatus) {
         if (appSt === 'deploying') info.appStatus.set(contextPath, 'failed');
       }
+      info.output.flush();
       outputChannel.appendLine(`\n[Tomcat] 시작 중 오류가 감지되어 서버 실행을 취소합니다: ${reason}`);
       vscode.window.showErrorMessage(`${server.name} 시작 실패 (기동 중 오류 감지로 취소됨): ${reason}`);
       this.running.delete(id);
@@ -984,7 +981,7 @@ export class ServerManager {
 
     proc.stdout.on('data', (d: Buffer) => {
       const text = d.toString();
-      appendCapped(info, text);
+      info.output.write(text);
 
       recentOutput = (recentOutput + text).slice(-2000);
       if (STARTUP_MARKER.test(recentOutput)) {
@@ -1015,7 +1012,7 @@ export class ServerManager {
 
     proc.stderr.on('data', (d: Buffer) => {
       const text = d.toString();
-      appendCapped(info, text);
+      info.output.write(text);
       checkAppDeployLinesStderr(text);
       if (info.status === 'starting') {
         const match = STARTUP_ERROR_MARKER.exec(text);
@@ -1026,6 +1023,7 @@ export class ServerManager {
     });
 
     proc.on('exit', (code) => {
+      info.output.flush(); // the process's last lines must land before the status line below
       outputChannel.appendLine(`\n[Tomcat] Process exited with code ${code}`);
       // A late exit event from an older process (stop() gave up waiting and the server was
       // started again) must not clear the newer session's state or move its held-back apps.
@@ -1041,6 +1039,7 @@ export class ServerManager {
     });
 
     proc.on('error', (err) => {
+      info.output.flush();
       outputChannel.appendLine(`\n[Tomcat] Failed to start: ${err.message}`);
       const current = this.running.get(id);
       if (current && current !== info) return;
