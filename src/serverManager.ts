@@ -17,6 +17,7 @@ import { findProjectRoot, detectBuildInfo } from './sourceOverlay';
 import { runBuildOnce } from './buildRunner';
 import { parkApps, restoreParked, discardParked, isHostAutoDeployDisabled } from './deferredDeploy';
 import { CappedOutput } from './cappedOutput';
+import { watchStartup } from './startupWatch';
 import { ApplyPortResult, applyHttpPort, readHttpPort, readShutdownConfig, sendShutdown } from './tomcatConfig';
 
 const CONFIG_SECTION = 'tomcat';
@@ -67,6 +68,9 @@ export class ServerManager {
    *  already gone by the next start - creating a fresh channel each time left every previous
    *  one, with all its log text, registered in the Output dropdown forever.) */
   private outputChannels = new Map<string, { name: string; channel: vscode.OutputChannel }>();
+  /** Closes the "<server> 시작 중..." toast of a start that is still in progress (see start()). */
+  private bootResolvers = new Map<string, () => void>();
+  private startWatches = new Map<string, { stop(): void }>();
   // Server ids currently between start() being invoked and the child process actually being
   // spawned (registered into `running`). Covers the gap where output-channel setup, deploy-
   // ignore file writes, and - for apps with live source sync - a full pre-start Maven/Gradle
@@ -641,6 +645,13 @@ export class ServerManager {
 
     try {
       await this.doStart(id, server, debug);
+    } catch (err: any) {
+      // Anything thrown before the process was spawned would otherwise leave the "시작 중..."
+      // toast on screen forever (it only closes on process output/exit) with no explanation.
+      this.bootResolvers.get(id)?.();
+      this.startWatches.get(id)?.stop();
+      this.outputChannels.get(id)?.channel.appendLine(`\n[Tomcat] 시작 중 오류가 발생했습니다: ${err?.message ?? err}`);
+      throw err;
     } finally {
       // doStart() resolves right after the process is actually spawned and registered into
       // `running` (everything after that is just attaching listeners, synchronously) - so by
@@ -669,6 +680,24 @@ export class ServerManager {
         reportPhase = message => progress.report({ message });
         return bootDone;
       }
+    );
+
+    this.bootResolvers.set(id, () => resolveBoot());
+
+    // Explains a "frozen" start on screen: reports extension-host stalls and, once the process is
+    // spawned, how long the JVM has been silent (see startupWatch.ts). It reads the channel lazily
+    // because it starts before the channel exists and any stall report is written after the stall.
+    let spawnedPid: number | undefined;
+    let sawOutput = false;
+    this.startWatches.get(id)?.stop();
+    this.startWatches.set(
+      id,
+      watchStartup({
+        log: msg => this.outputChannels.get(id)?.channel.appendLine(msg),
+        getPid: () => (sawOutput ? undefined : spawnedPid),
+        // Over once the process was spawned and has either come up, failed or exited.
+        isDone: () => spawnedPid !== undefined && this.running.get(id)?.status !== 'starting'
+      })
     );
 
     const script = this.getCatalinaScript(server.homePath);
@@ -821,6 +850,7 @@ export class ServerManager {
     // top of this function) to reflect this phase; it disappears as soon as the first line of
     // real output (or an early exit/error) shows up.
     reportPhase(debug ? 'JVM 부팅 및 디버그 에이전트 연결 중...' : 'JVM 부팅 중...');
+    spawnedPid = proc.pid;
     proc.stdout.once('data', resolveBoot);
     proc.once('exit', resolveBoot);
     proc.once('error', resolveBoot);
@@ -981,6 +1011,7 @@ export class ServerManager {
 
     proc.stdout.on('data', (d: Buffer) => {
       const text = d.toString();
+      sawOutput = true;
       info.output.write(text);
 
       recentOutput = (recentOutput + text).slice(-2000);
@@ -1012,6 +1043,7 @@ export class ServerManager {
 
     proc.stderr.on('data', (d: Buffer) => {
       const text = d.toString();
+      sawOutput = true;
       info.output.write(text);
       checkAppDeployLinesStderr(text);
       if (info.status === 'starting') {
