@@ -17,7 +17,7 @@ import { findProjectRoot, detectBuildInfo } from './sourceOverlay';
 import { runBuildOnce } from './buildRunner';
 import { parkApps, restoreParked, discardParked, isHostAutoDeployDisabled } from './deferredDeploy';
 import { CappedOutput } from './cappedOutput';
-import { watchStartup } from './startupWatch';
+import { timedStep, watchStartup } from './startupWatch';
 import { ApplyPortResult, applyHttpPort, readHttpPort, readShutdownConfig, sendShutdown } from './tomcatConfig';
 
 const CONFIG_SECTION = 'tomcat';
@@ -711,19 +711,21 @@ export class ServerManager {
 
     // Reuse this server's console channel (see outputChannels) and start it empty.
     const outputChannel = this.ensureOutputChannel(server);
+    // Names any pre-spawn step that blocks for a second or more (see timedStep).
+    const stepLog = (msg: string) => outputChannel.appendLine(msg);
     outputChannel.clear();
     outputChannel.show(true);
     outputChannel.appendLine(`[Tomcat] Preparing to start ${server.name}...`);
 
     // A previous session that died while apps were still parked (see deferredDeploy.ts) would
     // otherwise leave them missing from Tomcat's point of view - always put them back first.
-    const leftovers = restoreParked(server.homePath, msg => outputChannel.appendLine(msg));
+    const leftovers = timedStep(stepLog, '이전 실행의 대기 파일 복원', () => restoreParked(server.homePath, stepLog));
     if (leftovers.length > 0) {
       outputChannel.appendLine(`[Tomcat] 이전 실행에서 대기 중이던 앱 파일을 원래 위치로 복원했습니다: ${leftovers.join(', ')}`);
     }
 
     if (this.isExcludeDefaultWebappsEnabled()) {
-      this.applyDeployIgnore(server.homePath, outputChannel);
+      timedStep(stepLog, '기본 웹앱 제외 설정(server.xml)', () => this.applyDeployIgnore(server.homePath, outputChannel));
     }
 
     // Start (or refresh) live source-link watchers for any exploded app with an overlay
@@ -784,12 +786,12 @@ export class ServerManager {
     }
 
     const effectiveLogLevel = server.logLevel ?? this.getDefaultLogLevel();
-    this.applyLogLevel(server.homePath, effectiveLogLevel);
+    timedStep(stepLog, '로그 레벨 적용(logging.properties)', () => this.applyLogLevel(server.homePath, effectiveLogLevel));
 
     // Tomcat listens on whatever server.xml says, and that's the port the browser URL and the
     // Manager calls must use - so if the two ever differ (server.xml edited by hand, or a port
     // saved by an older version that never wrote it to the file), follow the file.
-    const actualHttpPort = readHttpPort(server.homePath);
+    const actualHttpPort = timedStep(stepLog, 'server.xml 포트 읽기', () => readHttpPort(server.homePath));
     if (actualHttpPort !== undefined && actualHttpPort !== server.httpPort) {
       outputChannel.appendLine(
         `[Tomcat] server.xml 의 HTTP 포트(${actualHttpPort})가 저장된 설정(${server.httpPort})과 달라서 server.xml 값을 따릅니다. ` +
@@ -811,7 +813,7 @@ export class ServerManager {
             '기동 후 배포를 쓸 수 없습니다. 이번에는 기존 방식(서버 시작 때 함께 배포)으로 시작합니다.'
         );
       } else {
-        deferredContextPaths = parkApps(server.homePath, server.deployedApps, msg => outputChannel.appendLine(msg));
+        deferredContextPaths = timedStep(stepLog, '앱 파일을 대기 폴더로 이동', () => parkApps(server.homePath, server.deployedApps, stepLog));
         if (deferredContextPaths.length > 0) {
           outputChannel.appendLine(
             `[Tomcat] 앱 나중에 배포 모드: 서버를 먼저 기동하고, 앱 ${deferredContextPaths.length}개(${deferredContextPaths.join(', ')})는 기동 후 배포합니다.`
@@ -836,12 +838,14 @@ export class ServerManager {
     // folder with spaces in its path (e.g. "Program Files") has to be quoted or cmd stops
     // at the first space.
     const command = process.platform === 'win32' && /\s/.test(script) ? `"${script}"` : script;
-    const proc = spawn(command, args, {
-      env,
-      cwd: server.homePath,
-      detached: process.platform !== 'win32',
-      shell: process.platform === 'win32'
-    });
+    const proc = timedStep(stepLog, 'Tomcat 프로세스 생성(spawn)', () =>
+      spawn(command, args, {
+        env,
+        cwd: server.homePath,
+        detached: process.platform !== 'win32',
+        shell: process.platform === 'win32'
+      })
+    );
 
     // Tomcat/the JVM print nothing at all until the JVM has booted and Catalina's own logging
     // is initialized - normal, but can look like nothing is happening for several seconds,
