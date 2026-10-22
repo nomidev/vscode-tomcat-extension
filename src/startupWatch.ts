@@ -60,8 +60,12 @@ export function watchStartup(options: StartupWatchOptions): { stop(): void } {
     if (lag >= lagThresholdMs) {
       options.log(
         `[Tomcat] VSCode 확장 호스트가 약 ${Math.round(lag / 1000)}초 동안 응답하지 않았습니다. ` +
-          '다른 확장(Java 언어 서버, JSP 분석 등)이나 VSCode 자체가 시작 직후에 CPU를 많이 쓰고 있었을 수 있습니다.'
+          '이 시간 동안에는 Tomcat이 출력한 내용도 읽지 못하므로 Tomcat이 조용했다는 뜻은 아닙니다. ' +
+          '다른 확장(Java 언어 서버, JSP 분석 등)이나 VSCode 자체가 CPU를 많이 쓰고 있었을 수 있습니다.'
       );
+      // Output the JVM printed while the loop was blocked is still sitting unread in the pipe, so
+      // the silence over that stretch says nothing about the JVM - start counting it again now.
+      lastBeat = now;
     }
 
     const pid = options.getPid();
